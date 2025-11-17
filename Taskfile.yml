@@ -1,0 +1,271 @@
+version: '3'
+
+# SemSummarize - Containerized Development Workflow
+# All tasks use Docker to avoid requiring local Rust installation
+
+vars:
+  IMAGE_NAME: semstreams-semsummarize
+  CONTAINER_NAME: semsummarize-dev
+  PORT: 8083
+
+tasks:
+  # Build tasks
+  build:
+    desc: Build Docker image
+    cmds:
+      - echo "🔨 Building semsummarize Docker image..."
+      - docker build -t {{.IMAGE_NAME}}:latest .
+      - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
+
+  build:fast:
+    desc: Build Docker image with buildkit cache
+    cmds:
+      - echo "🔨 Building semsummarize with BuildKit cache..."
+      - DOCKER_BUILDKIT=1 docker build --cache-from {{.IMAGE_NAME}}:latest -t {{.IMAGE_NAME}}:latest .
+      - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
+
+  build:no-cache:
+    desc: Build Docker image without cache
+    cmds:
+      - echo "🔨 Building semsummarize without cache..."
+      - docker build --no-cache -t {{.IMAGE_NAME}}:latest .
+      - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
+
+  # Run tasks
+  run:
+    desc: Run semsummarize service in Docker
+    deps: [build]
+    cmds:
+      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
+      - |
+        docker run -d \
+          --name {{.CONTAINER_NAME}} \
+          -p {{.PORT}}:{{.PORT}} \
+          -e SEMSUMMARIZE_MODEL=google/flan-t5-small \
+          -e SEMSUMMARIZE_PORT={{.PORT}} \
+          -e RUST_LOG=info \
+          -v semsummarize-cache:/home/semsummarize/.cache/huggingface \
+          {{.IMAGE_NAME}}:latest
+      - echo "✅ Service running at http://localhost:{{.PORT}}"
+      - echo "📊 Health: curl http://localhost:{{.PORT}}/health"
+      - echo "📝 Logs: task logs"
+
+  run:fg:
+    desc: Run semsummarize in foreground (see logs)
+    deps: [build]
+    cmds:
+      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
+      - |
+        docker run --rm \
+          --name {{.CONTAINER_NAME}} \
+          -p {{.PORT}}:{{.PORT}} \
+          -e SEMSUMMARIZE_MODEL=google/flan-t5-small \
+          -e SEMSUMMARIZE_PORT={{.PORT}} \
+          -e RUST_LOG=info \
+          -v semsummarize-cache:/home/semsummarize/.cache/huggingface \
+          {{.IMAGE_NAME}}:latest
+
+  run:base:
+    desc: Run with flan-t5-base model (higher quality)
+    deps: [build]
+    cmds:
+      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
+      - |
+        docker run -d \
+          --name {{.CONTAINER_NAME}} \
+          -p {{.PORT}}:{{.PORT}} \
+          -e SEMSUMMARIZE_MODEL=google/flan-t5-base \
+          -e SEMSUMMARIZE_PORT={{.PORT}} \
+          -e RUST_LOG=info \
+          -v semsummarize-cache:/home/semsummarize/.cache/huggingface \
+          {{.IMAGE_NAME}}:latest
+      - echo "✅ Service running with flan-t5-base model"
+
+  # Test tasks
+  test:health:
+    desc: Test health endpoint
+    cmds:
+      - echo "🧪 Testing health endpoint..."
+      - curl -f http://localhost:{{.PORT}}/health || (echo "❌ Health check failed" && exit 1)
+      - echo "✅ Health check passed"
+
+  test:summarize:
+    desc: Test summarization endpoint
+    cmds:
+      - echo "🧪 Testing summarization..."
+      - |
+        curl -X POST http://localhost:{{.PORT}}/summarize \
+          -H "Content-Type: application/json" \
+          -d '{
+            "input": "This is a long piece of text that needs to be summarized into a shorter form while preserving the key information and main ideas.",
+            "max_length": 50
+          }' || (echo "❌ Summarization test failed" && exit 1)
+      - echo ""
+      - echo "✅ Summarization test passed"
+
+  test:all:
+    desc: Run all tests
+    deps: [test:health, test:summarize]
+    cmds:
+      - echo "✅ All tests passed"
+
+  # Development tasks
+  logs:
+    desc: View service logs
+    cmds:
+      - docker logs -f {{.CONTAINER_NAME}}
+
+  logs:tail:
+    desc: Tail last 50 lines of logs
+    cmds:
+      - docker logs --tail 50 {{.CONTAINER_NAME}}
+
+  shell:
+    desc: Open shell in running container
+    cmds:
+      - docker exec -it {{.CONTAINER_NAME}} /bin/bash
+
+  restart:
+    desc: Restart the service
+    cmds:
+      - docker restart {{.CONTAINER_NAME}}
+      - echo "✅ Service restarted"
+
+  stop:
+    desc: Stop the service
+    cmds:
+      - docker stop {{.CONTAINER_NAME}}
+      - echo "✅ Service stopped"
+
+  # Metrics and monitoring
+  metrics:
+    desc: View Prometheus metrics
+    cmds:
+      - curl -s http://localhost:{{.PORT}}/metrics
+
+  models:
+    desc: List loaded models
+    cmds:
+      - curl -s http://localhost:{{.PORT}}/models | python3 -m json.tool
+
+  # Clean tasks
+  clean:
+    desc: Stop and remove container
+    cmds:
+      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
+      - echo "✅ Container removed"
+
+  clean:image:
+    desc: Remove Docker image
+    deps: [clean]
+    cmds:
+      - docker rmi {{.IMAGE_NAME}}:latest 2>/dev/null || true
+      - echo "✅ Image removed"
+
+  clean:cache:
+    desc: Remove model cache volume
+    deps: [clean]
+    cmds:
+      - docker volume rm semsummarize-cache 2>/dev/null || true
+      - echo "✅ Model cache removed"
+
+  clean:all:
+    desc: Clean everything (container, image, cache)
+    deps: [clean, clean:image, clean:cache]
+    cmds:
+      - echo "✅ Complete cleanup finished"
+
+  # Docker Compose integration
+  compose:up:
+    desc: Start with docker-compose (from semstreams dir)
+    dir: ../semstreams
+    cmds:
+      - docker compose -f docker-compose.services.yml --profile summarization up -d
+      - echo "✅ Service started via docker-compose"
+
+  compose:down:
+    desc: Stop docker-compose services
+    dir: ../semstreams
+    cmds:
+      - docker compose -f docker-compose.services.yml --profile summarization down
+      - echo "✅ Service stopped"
+
+  compose:logs:
+    desc: View docker-compose logs
+    dir: ../semstreams
+    cmds:
+      - docker compose -f docker-compose.services.yml logs -f semsummarize
+
+  # Development workflow shortcuts
+  dev:
+    desc: Full development cycle (build + run + test)
+    cmds:
+      - task build
+      - task run
+      - sleep 5  # Wait for service to start
+      - task test:all
+      - echo "✅ Development cycle complete"
+
+  dev:rebuild:
+    desc: Rebuild and restart service
+    cmds:
+      - task clean
+      - task build:no-cache
+      - task run
+      - echo "✅ Service rebuilt and running"
+
+  # CI/CD helpers
+  ci:test:
+    desc: CI test workflow (build + run + test + cleanup)
+    cmds:
+      - task build
+      - task run
+      - sleep 10  # Wait for model download
+      - task test:all
+      - task clean
+      - echo "✅ CI tests passed"
+
+  # Help
+  default:
+    desc: Show available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  help:
+    desc: Show detailed usage guide
+    silent: true
+    cmds:
+      - |
+        echo "SemSummarize - Containerized Development Tasks"
+        echo ""
+        echo "Quick Start:"
+        echo "  task dev              # Build, run, and test"
+        echo "  task logs             # View service logs"
+        echo "  task test:summarize   # Test summarization"
+        echo ""
+        echo "Build & Run:"
+        echo "  task build            # Build Docker image"
+        echo "  task run              # Run service (background)"
+        echo "  task run:fg           # Run service (foreground)"
+        echo "  task stop             # Stop service"
+        echo ""
+        echo "Testing:"
+        echo "  task test:health      # Health check"
+        echo "  task test:summarize   # Summarization test"
+        echo "  task test:all         # All tests"
+        echo ""
+        echo "Development:"
+        echo "  task logs             # Follow logs"
+        echo "  task shell            # Open container shell"
+        echo "  task restart          # Restart service"
+        echo "  task dev:rebuild      # Full rebuild"
+        echo ""
+        echo "Docker Compose:"
+        echo "  task compose:up       # Start with compose"
+        echo "  task compose:down     # Stop compose"
+        echo "  task compose:logs     # View compose logs"
+        echo ""
+        echo "Cleanup:"
+        echo "  task clean            # Remove container"
+        echo "  task clean:all        # Remove everything"

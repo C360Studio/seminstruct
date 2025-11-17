@@ -1,0 +1,49 @@
+# SemSummarize - Local Development
+# Standalone docker-compose for testing semsummarize without full SemStreams stack
+
+version: '3.8'
+
+services:
+  semsummarize:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: semstreams-semsummarize:dev
+    container_name: semsummarize-dev
+    ports:
+      - "8083:8083"
+    environment:
+      # Model configuration
+      - SEMSUMMARIZE_MODEL=google/flan-t5-small  # 77M params, fast
+      # Alternative models:
+      # - SEMSUMMARIZE_MODEL=google/flan-t5-base  # 250M params, higher quality
+      # - SEMSUMMARIZE_MODEL=facebook/bart-base   # 140M params, narrative style
+
+      # Server configuration
+      - SEMSUMMARIZE_PORT=8083
+
+      # Logging
+      - RUST_LOG=info  # Options: debug, info, warn, error
+    volumes:
+      # Persist model cache to avoid re-downloading
+      - semsummarize-cache:/home/semsummarize/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s  # Allow time for model download
+    restart: unless-stopped
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+volumes:
+  semsummarize-cache:
+    driver: local
