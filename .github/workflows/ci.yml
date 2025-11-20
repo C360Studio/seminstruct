@@ -76,7 +76,7 @@ jobs:
 
       - name: Test models endpoint
         run: |
-          response=$(curl -s http://localhost:8083/models)
+          response=$(curl -s http://localhost:8083/health)
           echo "Models response: $response"
           echo "$response" | grep -q 'google/flan-t5-small' || exit 1
 
@@ -85,7 +85,7 @@ jobs:
           response=$(curl -X POST http://localhost:8083/summarize \
             -H "Content-Type: application/json" \
             -d '{
-              "input": "This is a test input for summarization. It should be condensed into a shorter form.",
+              "text": "This is a test input for summarization. It should be condensed into a shorter form.",
               "max_length": 50
             }')
           echo "Summarization response: $response"

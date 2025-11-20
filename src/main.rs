@@ -5,10 +5,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::llama::{Cache, Llama, LlamaConfig};
+use candle_transformers::models::t5;
 use hf_hub::api::sync::Api;
 use prometheus::{Counter, Encoder, Histogram, HistogramOpts, Opts, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
@@ -70,11 +70,10 @@ struct AppState {
 }
 
 struct ModelState {
-    llama: Llama,
+    model: t5::T5ForConditionalGeneration,
     tokenizer: Tokenizer,
-    cache: Cache,
     device: Device,
-    config: candle_transformers::models::llama::Config,
+    config: t5::Config,
     dtype: DType,
 }
 
@@ -92,69 +91,110 @@ impl ModelState {
         info!("Downloading model files...");
         let config_path = api_repo.get("config.json")?;
         let tokenizer_path = api_repo.get("tokenizer.json")?;
-        let weights_path = api_repo.get("model.safetensors")?;
+
+        // Try to get weights - handle both single file and sharded models
+        let weights_paths = match api_repo.get("model.safetensors") {
+            Ok(path) => vec![path],
+            Err(_) => {
+                // Try sharded model format
+                info!("Single safetensors not found, trying sharded format...");
+                let index_path = api_repo.get("model.safetensors.index.json")?;
+                let index: serde_json::Value = serde_json::from_slice(&std::fs::read(&index_path)?)?;
+                let weight_map = index["weight_map"].as_object()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid safetensors index"))?;
+
+                let mut files = std::collections::HashSet::new();
+                for file in weight_map.values() {
+                    if let Some(filename) = file.as_str() {
+                        files.insert(filename.to_string());
+                    }
+                }
+
+                let mut paths = Vec::new();
+                for file in files {
+                    paths.push(api_repo.get(&file)?);
+                }
+                paths
+            }
+        };
 
         info!("Loading model into memory...");
 
         // Load config
-        let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_path)?)?;
-        let config = config.into_config(false); // no flash attention
+        let config_str = std::fs::read_to_string(config_path)?;
+        let mut config: t5::Config = serde_json::from_str(&config_str)?;
+        config.use_cache = false; // Disable cache for debugging
 
         // Load weights
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, &device)? };
-        let llama = Llama::load(vb, &config)?;
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&weights_paths, dtype, &device)?
+        };
+        let model = t5::T5ForConditionalGeneration::load(vb, &config)?;
 
         // Load tokenizer
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        // Create cache
-        let cache = Cache::new(true, dtype, &config, &device)?;
-
         info!("Model loaded successfully");
 
         Ok(Self {
-            llama,
+            model,
             tokenizer,
-            cache,
             device,
-            config: config.clone(),
+            config,
             dtype,
         })
     }
 
     fn generate(&mut self, prompt: &str, max_tokens: usize) -> anyhow::Result<String> {
-        // Reset cache for new generation (prevents shape mismatches between requests)
-        self.cache = Cache::new(true, self.dtype, &self.config, &self.device)?;
-
-        // Tokenize
-        let mut tokens = self
+        // Tokenize input
+        let tokens = self
             .tokenizer
             .encode(prompt, true)
             .map_err(|e| anyhow::anyhow!("Encoding failed: {}", e))?
             .get_ids()
             .to_vec();
 
-        // Setup generation with temperature for diversity
-        let mut logits_processor = LogitsProcessor::from_sampling(
-            299792458,
-            Sampling::All { temperature: 0.7 }, // Some randomness for better quality
-        );
+        let input_token_ids = Tensor::new(&tokens[..], &self.device)?.unsqueeze(0)?;
 
-        let eos_token = 2u32; // Standard EOS for Llama-family models
-        let mut generated = Vec::new();
+        // Encode input using T5 encoder
+        let encoder_output = self.model.encode(&input_token_ids)?;
 
-        // Generation loop (blue-collar simple approach)
+        // Setup generation with low temperature for factual summaries
+        let temperature = Some(0.1); // Low temperature for deterministic, factual outputs
+        let top_p = None; // Disable nucleus sampling for consistency
+        let mut logits_processor = LogitsProcessor::new(299792458, temperature, top_p);
+
+        // Use EOS token from config
+        let eos_token = self.config.eos_token_id as u32;
+
+        // Start with decoder start token from config (defaults to 0 for T5)
+        let decoder_start_token = self.config.decoder_start_token_id.unwrap_or(0) as u32;
+        let mut output_token_ids = vec![decoder_start_token];
+
+        // Decoder generation loop
         for index in 0..max_tokens {
-            let context_size = if index > 0 { 1 } else { tokens.len() };
+            // For T5 with cache: only pass last token after first iteration
+            let decoder_token_ids = if index == 0 || !self.config.use_cache {
+                Tensor::new(output_token_ids.as_slice(), &self.device)?.unsqueeze(0)?
+            } else {
+                let last_token = *output_token_ids.last().unwrap();
+                Tensor::new(&[last_token], &self.device)?.unsqueeze(0)?
+            };
 
-            let ctxt = &tokens[tokens.len().saturating_sub(context_size)..];
-            let input = Tensor::new(ctxt, &self.device)?.unsqueeze(0)?;
+            // Decode and get logits
+            let logits = self.model.decode(&decoder_token_ids, &encoder_output)?
+                .squeeze(0)?;
 
-            // start_pos is the position in the sequence where this input starts
-            let start_pos = tokens.len() - context_size;
-            let logits = self.llama.forward(&input, start_pos, &mut self.cache)?;
-            let logits = logits.squeeze(0)?.squeeze(0)?;
+            // Apply repeat penalty to prevent repetition
+            let repeat_penalty = 1.1;
+            let repeat_last_n = 64;
+            let start_at = output_token_ids.len().saturating_sub(repeat_last_n);
+            let logits = candle_transformers::utils::apply_repeat_penalty(
+                &logits,
+                repeat_penalty,
+                &output_token_ids[start_at..],
+            )?;
 
             let next_token = logits_processor.sample(&logits)?;
 
@@ -162,14 +202,19 @@ impl ModelState {
                 break;
             }
 
-            tokens.push(next_token);
-            generated.push(next_token);
+            output_token_ids.push(next_token);
         }
 
-        // Decode
+        // Decode output (skip the start token)
+        let output_tokens = if output_token_ids.len() > 1 {
+            &output_token_ids[1..]
+        } else {
+            &[]
+        };
+
         let summary = self
             .tokenizer
-            .decode(&generated, true)
+            .decode(output_tokens, true)
             .map_err(|e| anyhow::anyhow!("Decoding failed: {}", e))?;
 
         Ok(summary.trim().to_string())
@@ -230,7 +275,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Get config
     let model_name = std::env::var("SEMSUMMARIZE_MODEL")
-        .unwrap_or_else(|_| "HuggingFaceTB/SmolLM2-135M-Instruct".to_string());
+        .unwrap_or_else(|_| "google/flan-t5-small".to_string());
     let port = std::env::var("SEMSUMMARIZE_PORT")
         .unwrap_or_else(|_| "8083".to_string())
         .parse::<u16>()?;
@@ -289,11 +334,10 @@ async fn create_summary(
         ));
     }
 
-    // Build prompt - keep it simple and direct
-    let prompt = format!(
-        "<|im_start|>user\nWrite a one-sentence summary:\n{}\n<|im_end|>\n<|im_start|>assistant\nThis community contains ",
-        req.text.chars().take(400).collect::<String>() // Limit input, start the response
-    );
+    // Build prompt - T5/Flan-T5 uses simple instruction format
+    // Limit to first 400 words to avoid overly long inputs
+    let text = req.text.split_whitespace().take(400).collect::<Vec<_>>().join(" ");
+    let prompt = format!("summarize: {}", text);
 
     // Generate summary
     let summary = {
