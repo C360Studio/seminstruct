@@ -17,9 +17,19 @@ SemInstruct is a lightweight proxy service that provides an OpenAI-compatible AP
 - Health checks for shimmy backend
 - Prometheus metrics
 
+## Why a Proxy?
+
+SemInstruct exists to decouple your application from the inference backend:
+
+1. **Backend Flexibility** - Swap shimmy for OpenAI, Ollama, or any OpenAI-compatible service without code changes
+2. **Reliability** - Built-in retry logic with exponential backoff handles transient failures
+3. **Observability** - Prometheus metrics for request rates, latencies, and error tracking
+4. **Health Monitoring** - Aggregated health checks report backend availability
+5. **Fast Startup** - No model loading means instant restarts and scaling
+
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────┐
 │           seminstruct               │
 │  ┌─────────────────────────────┐    │
@@ -31,7 +41,7 @@ SemInstruct is a lightweight proxy service that provides an OpenAI-compatible AP
                ▼
 ┌─────────────────────────────────────┐
 │            shimmy                   │
-│  (Model loading & inference)       │  ~10GB memory
+│  (Model loading & inference)       │  ~6-8GB memory
 └─────────────────────────────────────┘
 ```
 
@@ -60,6 +70,7 @@ curl http://localhost:8083/v1/chat/completions \
 OpenAI-compatible chat completions endpoint (proxied to shimmy).
 
 **Request**:
+
 ```json
 {
   "model": "mistral-7b-instruct",
@@ -73,6 +84,7 @@ OpenAI-compatible chat completions endpoint (proxied to shimmy).
 ```
 
 **Response**:
+
 ```json
 {
   "id": "chatcmpl-abc123def456ghi789",
@@ -114,6 +126,7 @@ curl http://localhost:8083/health
 ```
 
 **Response**:
+
 ```json
 {
   "status": "healthy",
@@ -125,6 +138,7 @@ curl http://localhost:8083/health
 ### GET /metrics
 
 Prometheus metrics including:
+
 - `seminstruct_requests_total` - Total requests
 - `seminstruct_request_duration_seconds` - Request latency
 - `seminstruct_errors_total` - Total errors
@@ -179,7 +193,7 @@ curl http://localhost:8083/v1/chat/completions \
 
 | Metric | seminstruct | shimmy |
 |--------|-------------|--------|
-| Memory | ~256MB | ~10GB |
+| Memory | ~256MB | ~6-8GB |
 | Startup | <1s | 30-300s (model load) |
 | Container Size | ~50MB | ~4GB |
 
@@ -216,7 +230,7 @@ docker run -d \
 
 ## Project Structure
 
-```
+```shell
 seminstruct/
 ├── Cargo.toml              # Dependencies (axum, reqwest, etc.)
 ├── src/main.rs             # HTTP proxy + shimmy client
@@ -226,13 +240,14 @@ seminstruct/
 ```
 
 **Stack**:
+
 - **Axum**: Async web framework
 - **Reqwest**: HTTP client for shimmy
 - **Shimmy**: Inference backend (separate container)
 
 ## License
 
-Same as SemStreams parent project.
+MIT
 
 ---
 

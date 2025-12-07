@@ -449,14 +449,9 @@ async fn models_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
 async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let shimmy_healthy = state.shimmy.health().await;
 
-    let status = if shimmy_healthy {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-
+    // Always return 200 - proxy is healthy, shimmy status in body
     (
-        status,
+        StatusCode::OK,
         Json(HealthResponse {
             status: if shimmy_healthy { "healthy" } else { "degraded" }.to_string(),
             shimmy_url: state.config.shimmy_url.clone(),

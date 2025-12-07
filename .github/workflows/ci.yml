@@ -43,38 +43,60 @@ jobs:
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-      - name: Start seminstruct (standalone mode)
+      - name: Start shimmy with tiny model
         run: |
-          # Start seminstruct without shimmy to test it starts correctly
+          echo "Starting shimmy with Qwen2-0.5B (~300MB)..."
+          docker run -d \
+            --name shimmy-test \
+            -p 8080:8080 \
+            -e SHIMMY_MODEL=Qwen/Qwen2-0.5B-Instruct \
+            ghcr.io/michael-a-kuykendall/shimmy:latest
+
+      - name: Wait for shimmy model load
+        run: |
+          echo "Waiting for shimmy to download and load model..."
+          for i in {1..90}; do
+            if curl -sf http://localhost:8080/health 2>/dev/null; then
+              echo "Shimmy is ready!"
+              exit 0
+            fi
+            echo "Attempt $i/90: Model loading..."
+            sleep 5
+          done
+          echo "Shimmy failed to start"
+          docker logs shimmy-test
+          exit 1
+
+      - name: Start seminstruct
+        run: |
           docker run -d \
             --name seminstruct-test \
             -p 8083:8083 \
-            -e SEMINSTRUCT_SHIMMY_URL=http://shimmy:8080 \
+            -e SEMINSTRUCT_SHIMMY_URL=http://172.17.0.1:8080 \
             -e SEMINSTRUCT_PORT=8083 \
             -e RUST_LOG=info \
             seminstruct:test
 
-      - name: Wait for service to start
+      - name: Wait for seminstruct
         run: |
           echo "Waiting for seminstruct to start..."
           for i in {1..30}; do
             if curl -sf http://localhost:8083/health 2>/dev/null; then
-              echo "Service is running (shimmy not available, expected degraded state)"
+              echo "Seminstruct is ready!"
               exit 0
             fi
             echo "Attempt $i: Service not ready yet..."
             sleep 2
           done
-          echo "Service failed to start"
+          echo "Seminstruct failed to start"
           docker logs seminstruct-test
           exit 1
 
-      - name: Test health endpoint (degraded without shimmy)
+      - name: Test health endpoint
         run: |
           response=$(curl -s http://localhost:8083/health)
           echo "Health response: $response"
-          # Should return degraded status since shimmy is not available
-          echo "$response" | grep -q '"shimmy_healthy":false' || echo "Expected shimmy_healthy:false"
+          echo "$response" | grep -q '"shimmy_healthy":true' || (echo "Expected shimmy_healthy:true" && exit 1)
 
       - name: Test metrics endpoint
         run: |
@@ -83,13 +105,29 @@ jobs:
           echo "$metrics" | grep -q 'seminstruct_requests_total' || exit 1
           echo "$metrics" | grep -q 'seminstruct_request_duration_seconds' || exit 1
 
-      - name: View service logs
+      - name: Test chat completions (integration)
+        run: |
+          echo "Testing chat completions..."
+          response=$(curl -s http://localhost:8083/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{"model":"Qwen/Qwen2-0.5B-Instruct","messages":[{"role":"user","content":"Say hello"}],"max_tokens":20}')
+          echo "Response: $response"
+          echo "$response" | grep -q '"choices"' || (echo "Expected choices in response" && exit 1)
+          echo "Integration test passed!"
+
+      - name: View shimmy logs
+        if: always()
+        run: docker logs shimmy-test
+
+      - name: View seminstruct logs
         if: always()
         run: docker logs seminstruct-test
 
-      - name: Stop service
+      - name: Stop services
         if: always()
-        run: docker rm -f seminstruct-test
+        run: |
+          docker rm -f seminstruct-test || true
+          docker rm -f shimmy-test || true
 
       # Move cache
       - name: Move cache

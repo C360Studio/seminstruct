@@ -4,7 +4,7 @@
 
 ## Prerequisites
 
-- Docker (with 10GB+ available memory for shimmy model)
+- Docker (with 8GB+ available memory for shimmy model)
 - [Task](https://taskfile.dev/#/installation) (optional but recommended)
 
 ```bash
@@ -49,7 +49,7 @@ docker compose down
                │ HTTP
                ▼
 ┌─────────────────────────────────────┐
-│           shimmy:8080               │  Inference backend (~10GB)
+│           shimmy:8080               │  Inference backend (~6-8GB)
 └─────────────────────────────────────┘
 ```
 
@@ -72,6 +72,7 @@ docker compose down
 ## Troubleshooting
 
 ### Service won't start
+
 ```bash
 # Check shimmy logs (model download/loading)
 docker compose logs shimmy
@@ -85,6 +86,7 @@ docker compose up -d
 ```
 
 ### Shimmy not healthy
+
 ```bash
 # Wait for model download (~4GB, can take several minutes)
 docker compose logs -f shimmy
@@ -94,6 +96,7 @@ curl http://localhost:8080/health
 ```
 
 ### Port already in use
+
 ```bash
 # Find what's using ports
 lsof -i :8083  # seminstruct
@@ -123,8 +126,9 @@ lsof -i :8080  # shimmy
 **Expected Latency**: 300-500ms per response
 
 **Memory Usage**:
+
 - seminstruct: ~256MB
-- shimmy: ~10GB (includes model)
+- shimmy: ~6-8GB (includes model)
 
 ## Next Steps
 
