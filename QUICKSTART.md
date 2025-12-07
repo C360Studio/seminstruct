@@ -4,7 +4,7 @@
 
 ## Prerequisites
 
-- Docker (with 8GB+ available memory for shimmy model)
+- Docker (with 2GB+ available memory for default model)
 - [Task](https://taskfile.dev/#/installation) (optional but recommended)
 
 ```bash
@@ -14,22 +14,25 @@ snap install task --classic           # Ubuntu/Linux
 go install github.com/go-task/task/v3/cmd/task@latest  # Go
 ```
 
-## 5-Minute Quick Start
+## Quick Start
+
+> **First run takes longer** (~10-15 min) to build shimmy from source and download model.
+> Subsequent runs are fast with cached builds.
 
 ```bash
 cd seminstruct
 
-# 1. Build and run service (starts both seminstruct and shimmy)
+# 1. Build and run (builds shimmy from source + starts services)
 docker compose up -d
 
-# 2. Wait for shimmy to download model (~4GB first time)
+# 2. Wait for shimmy to download model
 docker compose logs -f shimmy
 
 # 3. Test chat completions (OpenAI-compatible)
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mistral-7b-instruct",
+    "model": "test",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 
@@ -38,6 +41,25 @@ docker compose logs -f
 
 # 5. Clean up
 docker compose down
+```
+
+## Model Sizes
+
+Default is `small` (Q2_K) for fast CI/tests. Override via MODEL_FILE build arg:
+
+| Size | Quantization | GGUF Size | Usage |
+|------|--------------|-----------|-------|
+| small | Q2_K | ~2.7GB | `MODEL_FILE=mistral-7b-instruct-v0.2.Q2_K.gguf` (default) |
+| medium | Q4_K_M | ~4.1GB | `MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf` |
+| large | Q6_K | ~5.5GB | `MODEL_FILE=mistral-7b-instruct-v0.2.Q6_K.gguf` |
+| xlarge | Q8_0 | ~7.7GB | `MODEL_FILE=mistral-7b-instruct-v0.2.Q8_0.gguf` |
+
+All models use Mistral-7B-Instruct-v0.2 with different quantization levels.
+
+```bash
+# Build with production model (requires rebuild)
+MODEL_FILE=mistral-7b-instruct-v0.2.Q6_K.gguf docker compose build
+docker compose up -d
 ```
 
 ## Architecture
@@ -49,7 +71,7 @@ docker compose down
                │ HTTP
                ▼
 ┌─────────────────────────────────────┐
-│           shimmy:8080               │  Inference backend (~6-8GB)
+│          shimmy:11435               │  Inference backend (~1-26GB)
 └─────────────────────────────────────┘
 ```
 
@@ -92,7 +114,7 @@ docker compose up -d
 docker compose logs -f shimmy
 
 # Check health directly
-curl http://localhost:8080/health
+curl http://localhost:11435/health
 ```
 
 ### Port already in use
@@ -100,7 +122,7 @@ curl http://localhost:8080/health
 ```bash
 # Find what's using ports
 lsof -i :8083  # seminstruct
-lsof -i :8080  # shimmy
+lsof -i :11435  # shimmy
 
 # Change ports in docker-compose.yml if needed
 ```
@@ -110,7 +132,7 @@ lsof -i :8080  # shimmy
 | Service | Port | Purpose |
 |---------|------|---------|
 | seminstruct | 8083 | OpenAI-compatible proxy |
-| shimmy | 8080 | Inference backend |
+| shimmy | 11435 | Inference backend |
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -121,14 +143,22 @@ lsof -i :8080  # shimmy
 
 **Service URL**: `http://localhost:8083`
 
-**Backend**: shimmy (Mistral-7B-Instruct)
+**Backend**: shimmy (Mistral-7B-Instruct-v0.2 GGUF)
 
 **Expected Latency**: 300-500ms per response
 
 **Memory Usage**:
 
 - seminstruct: ~256MB
-- shimmy: ~6-8GB (includes model)
+- shimmy: ~4-10GB (depends on quantization: Q2_K ~4GB, Q8_0 ~10GB)
+
+## Before You Push
+
+Always run integration tests locally before pushing:
+
+```bash
+task integration    # Full build + test + cleanup
+```
 
 ## Next Steps
 

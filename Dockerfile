@@ -51,7 +51,7 @@ RUN chown -R seminstruct:seminstruct /app
 USER seminstruct
 
 # Environment variables with defaults
-ENV SEMINSTRUCT_SHIMMY_URL=http://shimmy:8080
+ENV SEMINSTRUCT_SHIMMY_URL=http://shimmy:11435
 ENV SEMINSTRUCT_PORT=8083
 ENV SEMINSTRUCT_TIMEOUT_SECONDS=120
 ENV SEMINSTRUCT_MAX_RETRIES=3

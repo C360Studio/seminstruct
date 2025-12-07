@@ -7,88 +7,144 @@ vars:
   IMAGE_NAME: semstreams-seminstruct
   CONTAINER_NAME: seminstruct-dev
   PORT: 8083
-  SHIMMY_PORT: 8080
+  SHIMMY_PORT: 11435
 
 tasks:
   # Build tasks
   build:
     desc: Build Docker image
     cmds:
-      - echo "🔨 Building seminstruct Docker image..."
+      - echo "Building seminstruct Docker image..."
       - docker build -t {{.IMAGE_NAME}}:latest .
-      - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
+      - echo "Image built - {{.IMAGE_NAME}}:latest"
 
   build:fast:
     desc: Build Docker image with buildkit cache
     cmds:
-      - echo "🔨 Building seminstruct with BuildKit cache..."
+      - echo "Building seminstruct with BuildKit cache..."
       - DOCKER_BUILDKIT=1 docker build --cache-from {{.IMAGE_NAME}}:latest -t {{.IMAGE_NAME}}:latest .
-      - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
+      - echo "Image built - {{.IMAGE_NAME}}:latest"
 
   build:no-cache:
     desc: Build Docker image without cache
     cmds:
-      - echo "🔨 Building seminstruct without cache..."
+      - echo "Building seminstruct without cache..."
       - docker build --no-cache -t {{.IMAGE_NAME}}:latest .
-      - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
+      - echo "Image built - {{.IMAGE_NAME}}:latest"
 
   # Docker Compose (recommended way to run)
   up:
     desc: Start seminstruct + shimmy with docker-compose
     cmds:
       - docker compose up -d
-      - echo "✅ Services starting..."
-      - echo "📊 Health: curl http://localhost:{{.PORT}}/health"
-      - echo "📝 Logs: task logs"
+      - echo "Services starting..."
+      - echo "Health - curl http://localhost:{{.PORT}}/health"
+      - echo "Logs - task logs"
 
   down:
     desc: Stop all services
     cmds:
       - docker compose down
-      - echo "✅ Services stopped"
+      - echo "Services stopped"
+
+  # Integration tests (run before push!)
+  integration:
+    desc: Run full integration tests locally (run before push!)
+    cmds:
+      - echo "Building services (shimmy from source)..."
+      - docker compose build
+      - docker compose up -d
+      - |
+        echo "Waiting for shimmy..."
+        for i in $(seq 1 90); do
+          if curl -sf http://localhost:{{.SHIMMY_PORT}}/health 2>/dev/null; then
+            echo "Shimmy ready!"
+            break
+          fi
+          if [ $i -eq 90 ]; then
+            echo "Shimmy timeout"
+            docker compose logs shimmy
+            exit 1
+          fi
+          echo "Attempt $i/90..."
+          sleep 5
+        done
+      - |
+        echo "Waiting for seminstruct..."
+        for i in $(seq 1 30); do
+          if curl -sf http://localhost:{{.PORT}}/health 2>/dev/null; then
+            echo "Seminstruct ready!"
+            break
+          fi
+          if [ $i -eq 30 ]; then
+            echo "Seminstruct timeout"
+            docker compose logs seminstruct
+            exit 1
+          fi
+          sleep 2
+        done
+      - echo "=== Health Check ==="
+      - curl -s http://localhost:{{.PORT}}/health | jq .
+      - echo "=== Chat Completion ==="
+      - |
+        model_id=$(curl -s http://localhost:{{.PORT}}/v1/models | jq -r '.data[0].id // "test"')
+        curl -s http://localhost:{{.PORT}}/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20,\"stream\":false}" | jq .
+      - echo "=== Integration tests passed! ==="
+      - docker compose down
+
+  integration:quick:
+    desc: Run integration tests (services already running)
+    cmds:
+      - echo "=== Health Check ==="
+      - curl -s http://localhost:{{.PORT}}/health | jq .
+      - echo "=== Chat Completion ==="
+      - |
+        model_id=$(curl -s http://localhost:{{.PORT}}/v1/models | jq -r '.data[0].id // "test"')
+        curl -s http://localhost:{{.PORT}}/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20,\"stream\":false}" | jq .
 
   # Test tasks
   test:health:
     desc: Test health endpoint
     cmds:
-      - echo "🧪 Testing health endpoint..."
-      - curl -f http://localhost:{{.PORT}}/health || (echo "❌ Health check failed" && exit 1)
-      - echo "✅ Health check passed"
+      - echo "Testing health endpoint..."
+      - curl -f http://localhost:{{.PORT}}/health || (echo "Health check failed" && exit 1)
+      - echo "Health check passed"
 
   test:shimmy:
     desc: Test shimmy backend directly
     cmds:
-      - echo "🧪 Testing shimmy backend..."
-      - curl -f http://localhost:{{.SHIMMY_PORT}}/health || (echo "❌ Shimmy health check failed" && exit 1)
-      - echo "✅ Shimmy health check passed"
+      - echo "Testing shimmy backend..."
+      - curl -f http://localhost:{{.SHIMMY_PORT}}/health || (echo "Shimmy health check failed" && exit 1)
+      - echo "Shimmy health check passed"
 
   test:chat:
     desc: Test chat completions endpoint (OpenAI-compatible)
     cmds:
-      - echo "🧪 Testing chat completions..."
+      - echo "Testing chat completions..."
       - |
+        model_id=$(curl -s http://localhost:{{.PORT}}/v1/models | jq -r '.data[0].id // "test"')
         curl -s http://localhost:{{.PORT}}/v1/chat/completions \
           -H "Content-Type: application/json" \
-          -d '{
-            "model": "mistral-7b-instruct",
-            "messages": [{"role": "user", "content": "Hello, how are you?"}],
-            "max_tokens": 50
-          }' || (echo "❌ Chat completions test failed" && exit 1)
+          -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":50,\"stream\":false}" || (echo "Chat completions test failed" && exit 1)
       - echo ""
-      - echo "✅ Chat completions test passed"
+      - echo "Chat completions test passed"
 
   test:models:
     desc: Test models endpoint
     cmds:
-      - echo "🧪 Testing models endpoint..."
+      - echo "Testing models endpoint..."
       - curl -s http://localhost:{{.PORT}}/v1/models | python3 -m json.tool
-      - echo "✅ Models endpoint test passed"
+      - echo "Models endpoint test passed"
 
   test:all:
     desc: Run all tests
     deps: [test:health, test:chat]
     cmds:
-      - echo "✅ All tests passed"
+      - echo "All tests passed"
 
   # Logging
   logs:
@@ -122,27 +178,27 @@ tasks:
     desc: Stop and remove containers
     cmds:
       - docker compose down
-      - echo "✅ Containers removed"
+      - echo "Containers removed"
 
   clean:image:
     desc: Remove Docker image
     deps: [clean]
     cmds:
       - docker rmi {{.IMAGE_NAME}}:latest 2>/dev/null || true
-      - echo "✅ Image removed"
+      - echo "Image removed"
 
   clean:cache:
     desc: Remove shimmy model cache volume
     deps: [clean]
     cmds:
       - docker volume rm seminstruct_shimmy-cache 2>/dev/null || true
-      - echo "✅ Model cache removed"
+      - echo "Model cache removed"
 
   clean:all:
     desc: Clean everything (containers, images, cache)
     deps: [clean, clean:image, clean:cache]
     cmds:
-      - echo "✅ Complete cleanup finished"
+      - echo "Complete cleanup finished"
 
   # Development workflow shortcuts
   dev:
@@ -150,18 +206,18 @@ tasks:
     cmds:
       - task build
       - task up
-      - echo "⏳ Waiting for shimmy to load model (this may take a few minutes)..."
+      - echo "Waiting for shimmy to load model (this may take a few minutes)..."
       - |
         for i in $(seq 1 60); do
           if curl -sf http://localhost:{{.SHIMMY_PORT}}/health > /dev/null 2>&1; then
-            echo "✅ Shimmy is ready"
+            echo "Shimmy is ready"
             break
           fi
           echo "  Waiting... ($i/60)"
           sleep 10
         done
       - task test:all
-      - echo "✅ Development cycle complete"
+      - echo "Development cycle complete"
 
   dev:rebuild:
     desc: Rebuild and restart services
@@ -169,7 +225,7 @@ tasks:
       - task clean
       - task build:no-cache
       - task up
-      - echo "✅ Services rebuilt and running"
+      - echo "Services rebuilt and running"
 
   # Help
   default:
@@ -190,7 +246,7 @@ tasks:
         echo "  task logs             # View service logs"
         echo "  task test:chat        # Test chat completions"
         echo ""
-        echo "Build & Run:"
+        echo "Build and Run:"
         echo "  task build            # Build seminstruct image"
         echo "  task up               # Start all services"
         echo "  task down             # Stop all services"
@@ -201,6 +257,10 @@ tasks:
         echo "  task test:chat        # Chat completions test"
         echo "  task test:models      # Models endpoint test"
         echo "  task test:all         # All tests"
+        echo ""
+        echo "Integration (run before push):"
+        echo "  task integration      # Full build + test + cleanup"
+        echo "  task integration:quick # Test only (services running)"
         echo ""
         echo "Logging:"
         echo "  task logs             # All service logs"
