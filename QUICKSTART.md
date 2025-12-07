@@ -45,21 +45,22 @@ docker compose down
 
 ## Model Sizes
 
-Default is `small` (Q2_K) for fast CI/tests. Override via MODEL_FILE build arg:
+Default is TinyLlama-1.1B (~660MB) for CI. Override for production:
 
-| Size | Quantization | GGUF Size | Usage |
-|------|--------------|-----------|-------|
-| small | Q2_K | ~2.7GB | `MODEL_FILE=mistral-7b-instruct-v0.2.Q2_K.gguf` (default) |
-| medium | Q4_K_M | ~4.1GB | `MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf` |
-| large | Q6_K | ~5.5GB | `MODEL_FILE=mistral-7b-instruct-v0.2.Q6_K.gguf` |
-| xlarge | Q8_0 | ~7.7GB | `MODEL_FILE=mistral-7b-instruct-v0.2.Q8_0.gguf` |
-
-All models use Mistral-7B-Instruct-v0.2 with different quantization levels.
+| Tier | Model | Size | Usage |
+|------|-------|------|-------|
+| CI (default) | TinyLlama-1.1B Q4_K_M | ~660MB | Default, fits GitHub Actions |
+| Dev | Mistral-7B Q4_K_M | ~4.1GB | Good balance for local dev |
+| Prod | Mistral-7B Q6_K | ~5.5GB | Production quality |
 
 ```bash
-# Build with production model (requires rebuild)
-MODEL_FILE=mistral-7b-instruct-v0.2.Q6_K.gguf docker compose build
-docker compose up -d
+# Default (TinyLlama for CI)
+docker compose build
+
+# Production with Mistral-7B
+MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
+MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
+docker compose build
 ```
 
 ## Architecture
