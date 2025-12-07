@@ -1,10 +1,10 @@
-# SemSummarize Quick Start
+# SemInstruct Quick Start
 
 **No Rust installation needed - everything runs in Docker!**
 
 ## Prerequisites
 
-- Docker
+- Docker (with 10GB+ available memory for shimmy model)
 - [Task](https://taskfile.dev/#/installation) (optional but recommended)
 
 ```bash
@@ -17,156 +17,116 @@ go install github.com/go-task/task/v3/cmd/task@latest  # Go
 ## 5-Minute Quick Start
 
 ```bash
-cd semsummarize
+cd seminstruct
 
-# 1. Build and run service
-task dev
+# 1. Build and run service (starts both seminstruct and shimmy)
+docker compose up -d
 
-# 2. Test summarization
-curl -X POST http://localhost:8083/summarize \
+# 2. Wait for shimmy to download model (~4GB first time)
+docker compose logs -f shimmy
+
+# 3. Test chat completions (OpenAI-compatible)
+curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "input": "Community with 15 drones in SF Bay Area, avg battery 78.5%",
-    "max_length": 50
+    "model": "mistral-7b-instruct",
+    "messages": [{"role": "user", "content": "Hello!"}]
   }'
 
-# 3. View logs
-task logs
+# 4. View logs
+docker compose logs -f
 
-# 4. Clean up
-task clean
+# 5. Clean up
+docker compose down
 ```
 
-## Common Tasks
+## Architecture
 
-```bash
-# Build
-task build              # Build Docker image
-task build:no-cache     # Rebuild from scratch
-
-# Run
-task run                # Run in background
-task run:fg             # Run in foreground (see logs)
-task stop               # Stop service
-
-# Test
-task test:health        # Health check
-task test:summarize     # Summarization test
-task test:all           # All tests
-
-# Monitor
-task logs               # Follow logs
-task logs:tail          # Last 50 lines
-task metrics            # View Prometheus metrics
-
-# Development
-task restart            # Restart service
-task shell              # Open container shell
-task dev:rebuild        # Clean + rebuild + run
-
-# Cleanup
-task clean              # Remove container
-task clean:all          # Remove everything
+```
+┌─────────────────────────────────────┐
+│         seminstruct:8083            │  Lightweight proxy (~256MB)
+└──────────────┬──────────────────────┘
+               │ HTTP
+               ▼
+┌─────────────────────────────────────┐
+│           shimmy:8080               │  Inference backend (~10GB)
+└─────────────────────────────────────┘
 ```
 
 ## Docker Compose Workflow
 
 ```bash
-# Start
+# Start both services
 docker compose up -d
 
-# Logs
-docker compose logs -f
+# Check shimmy status (model loading)
+docker compose logs -f shimmy
+
+# Check seminstruct status
+docker compose logs -f seminstruct
 
 # Stop
 docker compose down
-```
-
-Or use Task shortcuts:
-```bash
-task compose:up
-task compose:logs
-task compose:down
 ```
 
 ## Troubleshooting
 
 ### Service won't start
 ```bash
-# Check logs
-task logs:tail
+# Check shimmy logs (model download/loading)
+docker compose logs shimmy
 
-# Rebuild from scratch
-task clean:all
-task build:no-cache
-task run
+# Check seminstruct logs (proxy errors)
+docker compose logs seminstruct
+
+# Restart everything
+docker compose down
+docker compose up -d
+```
+
+### Shimmy not healthy
+```bash
+# Wait for model download (~4GB, can take several minutes)
+docker compose logs -f shimmy
+
+# Check health directly
+curl http://localhost:8080/health
 ```
 
 ### Port already in use
 ```bash
-# Find what's using port 8083
-lsof -i :8083
+# Find what's using ports
+lsof -i :8083  # seminstruct
+lsof -i :8080  # shimmy
 
-# Kill the process or change port in docker-compose.yml
-```
-
-### Model download slow/fails
-```bash
-# First run downloads ~300MB model - be patient
-# Check progress in logs
-task logs
-
-# If download fails, clean cache and retry
-task clean:cache
-task run
-```
-
-## Next Steps
-
-- Read [README.md](./README.md) for full documentation
-- Check [Taskfile.yml](./Taskfile.yml) for all available tasks
-- Review [.github/workflows/ci.yml](.github/workflows/ci.yml) for CI/CD setup
-- Integrate with SemStreams via HTTP client (see README)
-
-## Integration with SemStreams
-
-The service is already configured in `../semstreams/docker-compose.services.yml`:
-
-```bash
-# Start from semstreams directory
-cd ../semstreams
-docker compose -f docker-compose.services.yml --profile summarization up -d
-```
-
-Or use the Task shortcut:
-```bash
-cd semsummarize
-task compose:up
-```
-
-## Getting Help
-
-```bash
-# List all tasks
-task --list
-
-# Show detailed help
-task help
+# Change ports in docker-compose.yml if needed
 ```
 
 ## Quick Reference
 
+| Service | Port | Purpose |
+|---------|------|---------|
+| seminstruct | 8083 | OpenAI-compatible proxy |
+| shimmy | 8080 | Inference backend |
+
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/health` | GET | Health check |
-| `/models` | GET | List loaded models |
-| `/summarize` | POST | Generate summary |
+| `/health` | GET | Health check (includes shimmy status) |
+| `/v1/models` | GET | List available models |
+| `/v1/chat/completions` | POST | OpenAI-compatible chat |
 | `/metrics` | GET | Prometheus metrics |
 
 **Service URL**: `http://localhost:8083`
 
-**Default Model**: `google/flan-t5-small` (77M params)
+**Backend**: shimmy (Mistral-7B-Instruct)
 
-**Expected Latency**: 50-200ms per summary (CPU)
+**Expected Latency**: 300-500ms per response
 
-**Memory Usage**: ~300MB with small model
+**Memory Usage**:
+- seminstruct: ~256MB
+- shimmy: ~10GB (includes model)
+
+## Next Steps
+
+- Read [README.md](./README.md) for full documentation
+- Integrate with SemStreams via HTTP client

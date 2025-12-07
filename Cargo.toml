@@ -1,9 +1,9 @@
 [package]
-name = "semsummarize"
-version = "0.1.0"
+name = "seminstruct"
+version = "0.2.0"
 edition = "2021"
 authors = ["C360 Team"]
-description = "Lightweight HTTP summarization service using Candle with OpenAI-compatible API"
+description = "Lightweight proxy service for OpenAI-compatible LLM inference via shimmy"
 
 [dependencies]
 # HTTP server
@@ -12,19 +12,19 @@ tokio = { version = "1", features = ["full"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 
-# ML inference with Candle
-candle-core = "0.8"
-candle-nn = "0.8"
-candle-transformers = "0.8"
-tokenizers = "0.20"
-hf-hub = "0.4"
+# HTTP client for shimmy proxy
+reqwest = { version = "0.12", features = ["json"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+
 # Error handling
 anyhow = "1"
+thiserror = "1"
 
 # Logging
 tracing = "0.1"
@@ -33,6 +33,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Metrics
 prometheus = "0.13"
 
+[dev-dependencies]
+# Testing
+mockito = "1.6"
+
 [profile.release]
 lto = true
 codegen-units = 1
@@ -40,5 +44,5 @@ opt-level = 3
 strip = true
 
 [[bin]]
-name = "semsummarize"
+name = "seminstruct"
 path = "src/main.rs"

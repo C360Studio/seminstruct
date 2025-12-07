@@ -1,85 +1,51 @@
 version: '3'
 
-# SemSummarize - Containerized Development Workflow
-# All tasks use Docker to avoid requiring local Rust installation
+# SemInstruct - Containerized Development Workflow
+# Lightweight proxy to shimmy for OpenAI-compatible inference
 
 vars:
-  IMAGE_NAME: semstreams-semsummarize
-  CONTAINER_NAME: semsummarize-dev
+  IMAGE_NAME: semstreams-seminstruct
+  CONTAINER_NAME: seminstruct-dev
   PORT: 8083
+  SHIMMY_PORT: 8080
 
 tasks:
   # Build tasks
   build:
     desc: Build Docker image
     cmds:
-      - echo "🔨 Building semsummarize Docker image..."
+      - echo "🔨 Building seminstruct Docker image..."
       - docker build -t {{.IMAGE_NAME}}:latest .
       - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
 
   build:fast:
     desc: Build Docker image with buildkit cache
     cmds:
-      - echo "🔨 Building semsummarize with BuildKit cache..."
+      - echo "🔨 Building seminstruct with BuildKit cache..."
       - DOCKER_BUILDKIT=1 docker build --cache-from {{.IMAGE_NAME}}:latest -t {{.IMAGE_NAME}}:latest .
       - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
 
   build:no-cache:
     desc: Build Docker image without cache
     cmds:
-      - echo "🔨 Building semsummarize without cache..."
+      - echo "🔨 Building seminstruct without cache..."
       - docker build --no-cache -t {{.IMAGE_NAME}}:latest .
       - echo "✅ Image built: {{.IMAGE_NAME}}:latest"
 
-  # Run tasks
-  run:
-    desc: Run semsummarize service in Docker
-    deps: [build]
+  # Docker Compose (recommended way to run)
+  up:
+    desc: Start seminstruct + shimmy with docker-compose
     cmds:
-      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
-      - |
-        docker run -d \
-          --name {{.CONTAINER_NAME}} \
-          -p {{.PORT}}:{{.PORT}} \
-          -e SEMSUMMARIZE_MODEL=google/flan-t5-small \
-          -e SEMSUMMARIZE_PORT={{.PORT}} \
-          -e RUST_LOG=info \
-          -v semsummarize-cache:/home/semsummarize/.cache/huggingface \
-          {{.IMAGE_NAME}}:latest
-      - echo "✅ Service running at http://localhost:{{.PORT}}"
+      - docker compose up -d
+      - echo "✅ Services starting..."
       - echo "📊 Health: curl http://localhost:{{.PORT}}/health"
       - echo "📝 Logs: task logs"
 
-  run:fg:
-    desc: Run semsummarize in foreground (see logs)
-    deps: [build]
+  down:
+    desc: Stop all services
     cmds:
-      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
-      - |
-        docker run --rm \
-          --name {{.CONTAINER_NAME}} \
-          -p {{.PORT}}:{{.PORT}} \
-          -e SEMSUMMARIZE_MODEL=google/flan-t5-small \
-          -e SEMSUMMARIZE_PORT={{.PORT}} \
-          -e RUST_LOG=info \
-          -v semsummarize-cache:/home/semsummarize/.cache/huggingface \
-          {{.IMAGE_NAME}}:latest
-
-  run:base:
-    desc: Run with flan-t5-base model (higher quality)
-    deps: [build]
-    cmds:
-      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
-      - |
-        docker run -d \
-          --name {{.CONTAINER_NAME}} \
-          -p {{.PORT}}:{{.PORT}} \
-          -e SEMSUMMARIZE_MODEL=google/flan-t5-base \
-          -e SEMSUMMARIZE_PORT={{.PORT}} \
-          -e RUST_LOG=info \
-          -v semsummarize-cache:/home/semsummarize/.cache/huggingface \
-          {{.IMAGE_NAME}}:latest
-      - echo "✅ Service running with flan-t5-base model"
+      - docker compose down
+      - echo "✅ Services stopped"
 
   # Test tasks
   test:health:
@@ -89,53 +55,56 @@ tasks:
       - curl -f http://localhost:{{.PORT}}/health || (echo "❌ Health check failed" && exit 1)
       - echo "✅ Health check passed"
 
-  test:summarize:
-    desc: Test summarization endpoint
+  test:shimmy:
+    desc: Test shimmy backend directly
     cmds:
-      - echo "🧪 Testing summarization..."
+      - echo "🧪 Testing shimmy backend..."
+      - curl -f http://localhost:{{.SHIMMY_PORT}}/health || (echo "❌ Shimmy health check failed" && exit 1)
+      - echo "✅ Shimmy health check passed"
+
+  test:chat:
+    desc: Test chat completions endpoint (OpenAI-compatible)
+    cmds:
+      - echo "🧪 Testing chat completions..."
       - |
-        curl -X POST http://localhost:{{.PORT}}/summarize \
+        curl -s http://localhost:{{.PORT}}/v1/chat/completions \
           -H "Content-Type: application/json" \
           -d '{
-            "input": "This is a long piece of text that needs to be summarized into a shorter form while preserving the key information and main ideas.",
-            "max_length": 50
-          }' || (echo "❌ Summarization test failed" && exit 1)
+            "model": "mistral-7b-instruct",
+            "messages": [{"role": "user", "content": "Hello, how are you?"}],
+            "max_tokens": 50
+          }' || (echo "❌ Chat completions test failed" && exit 1)
       - echo ""
-      - echo "✅ Summarization test passed"
+      - echo "✅ Chat completions test passed"
+
+  test:models:
+    desc: Test models endpoint
+    cmds:
+      - echo "🧪 Testing models endpoint..."
+      - curl -s http://localhost:{{.PORT}}/v1/models | python3 -m json.tool
+      - echo "✅ Models endpoint test passed"
 
   test:all:
     desc: Run all tests
-    deps: [test:health, test:summarize]
+    deps: [test:health, test:chat]
     cmds:
       - echo "✅ All tests passed"
 
-  # Development tasks
+  # Logging
   logs:
-    desc: View service logs
+    desc: View all service logs
     cmds:
-      - docker logs -f {{.CONTAINER_NAME}}
+      - docker compose logs -f
 
-  logs:tail:
-    desc: Tail last 50 lines of logs
+  logs:seminstruct:
+    desc: View seminstruct logs only
     cmds:
-      - docker logs --tail 50 {{.CONTAINER_NAME}}
+      - docker compose logs -f seminstruct
 
-  shell:
-    desc: Open shell in running container
+  logs:shimmy:
+    desc: View shimmy logs only
     cmds:
-      - docker exec -it {{.CONTAINER_NAME}} /bin/bash
-
-  restart:
-    desc: Restart the service
-    cmds:
-      - docker restart {{.CONTAINER_NAME}}
-      - echo "✅ Service restarted"
-
-  stop:
-    desc: Stop the service
-    cmds:
-      - docker stop {{.CONTAINER_NAME}}
-      - echo "✅ Service stopped"
+      - docker compose logs -f shimmy
 
   # Metrics and monitoring
   metrics:
@@ -146,14 +115,14 @@ tasks:
   models:
     desc: List loaded models
     cmds:
-      - curl -s http://localhost:{{.PORT}}/models | python3 -m json.tool
+      - curl -s http://localhost:{{.PORT}}/v1/models | python3 -m json.tool
 
   # Clean tasks
   clean:
-    desc: Stop and remove container
+    desc: Stop and remove containers
     cmds:
-      - docker rm -f {{.CONTAINER_NAME}} 2>/dev/null || true
-      - echo "✅ Container removed"
+      - docker compose down
+      - echo "✅ Containers removed"
 
   clean:image:
     desc: Remove Docker image
@@ -163,67 +132,44 @@ tasks:
       - echo "✅ Image removed"
 
   clean:cache:
-    desc: Remove model cache volume
+    desc: Remove shimmy model cache volume
     deps: [clean]
     cmds:
-      - docker volume rm semsummarize-cache 2>/dev/null || true
+      - docker volume rm seminstruct_shimmy-cache 2>/dev/null || true
       - echo "✅ Model cache removed"
 
   clean:all:
-    desc: Clean everything (container, image, cache)
+    desc: Clean everything (containers, images, cache)
     deps: [clean, clean:image, clean:cache]
     cmds:
       - echo "✅ Complete cleanup finished"
 
-  # Docker Compose integration
-  compose:up:
-    desc: Start with docker-compose (from semstreams dir)
-    dir: ../semstreams
-    cmds:
-      - docker compose -f docker-compose.services.yml --profile summarization up -d
-      - echo "✅ Service started via docker-compose"
-
-  compose:down:
-    desc: Stop docker-compose services
-    dir: ../semstreams
-    cmds:
-      - docker compose -f docker-compose.services.yml --profile summarization down
-      - echo "✅ Service stopped"
-
-  compose:logs:
-    desc: View docker-compose logs
-    dir: ../semstreams
-    cmds:
-      - docker compose -f docker-compose.services.yml logs -f semsummarize
-
   # Development workflow shortcuts
   dev:
-    desc: Full development cycle (build + run + test)
+    desc: Full development cycle (build + up + wait + test)
     cmds:
       - task build
-      - task run
-      - sleep 5  # Wait for service to start
+      - task up
+      - echo "⏳ Waiting for shimmy to load model (this may take a few minutes)..."
+      - |
+        for i in $(seq 1 60); do
+          if curl -sf http://localhost:{{.SHIMMY_PORT}}/health > /dev/null 2>&1; then
+            echo "✅ Shimmy is ready"
+            break
+          fi
+          echo "  Waiting... ($i/60)"
+          sleep 10
+        done
       - task test:all
       - echo "✅ Development cycle complete"
 
   dev:rebuild:
-    desc: Rebuild and restart service
+    desc: Rebuild and restart services
     cmds:
       - task clean
       - task build:no-cache
-      - task run
-      - echo "✅ Service rebuilt and running"
-
-  # CI/CD helpers
-  ci:test:
-    desc: CI test workflow (build + run + test + cleanup)
-    cmds:
-      - task build
-      - task run
-      - sleep 10  # Wait for model download
-      - task test:all
-      - task clean
-      - echo "✅ CI tests passed"
+      - task up
+      - echo "✅ Services rebuilt and running"
 
   # Help
   default:
@@ -237,35 +183,34 @@ tasks:
     silent: true
     cmds:
       - |
-        echo "SemSummarize - Containerized Development Tasks"
+        echo "SemInstruct - OpenAI-Compatible Inference Proxy"
         echo ""
         echo "Quick Start:"
-        echo "  task dev              # Build, run, and test"
+        echo "  task up               # Start seminstruct + shimmy"
         echo "  task logs             # View service logs"
-        echo "  task test:summarize   # Test summarization"
+        echo "  task test:chat        # Test chat completions"
         echo ""
         echo "Build & Run:"
-        echo "  task build            # Build Docker image"
-        echo "  task run              # Run service (background)"
-        echo "  task run:fg           # Run service (foreground)"
-        echo "  task stop             # Stop service"
+        echo "  task build            # Build seminstruct image"
+        echo "  task up               # Start all services"
+        echo "  task down             # Stop all services"
         echo ""
         echo "Testing:"
-        echo "  task test:health      # Health check"
-        echo "  task test:summarize   # Summarization test"
+        echo "  task test:health      # Health check (includes shimmy status)"
+        echo "  task test:shimmy      # Test shimmy directly"
+        echo "  task test:chat        # Chat completions test"
+        echo "  task test:models      # Models endpoint test"
         echo "  task test:all         # All tests"
         echo ""
+        echo "Logging:"
+        echo "  task logs             # All service logs"
+        echo "  task logs:seminstruct # Proxy logs only"
+        echo "  task logs:shimmy      # Backend logs only"
+        echo ""
         echo "Development:"
-        echo "  task logs             # Follow logs"
-        echo "  task shell            # Open container shell"
-        echo "  task restart          # Restart service"
+        echo "  task dev              # Full dev cycle"
         echo "  task dev:rebuild      # Full rebuild"
         echo ""
-        echo "Docker Compose:"
-        echo "  task compose:up       # Start with compose"
-        echo "  task compose:down     # Stop compose"
-        echo "  task compose:logs     # View compose logs"
-        echo ""
         echo "Cleanup:"
-        echo "  task clean            # Remove container"
+        echo "  task clean            # Remove containers"
         echo "  task clean:all        # Remove everything"

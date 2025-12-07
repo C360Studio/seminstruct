@@ -5,260 +5,299 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::VarBuilder;
-use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::t5;
-use hf_hub::api::sync::Api;
 use prometheus::{Counter, Encoder, Histogram, HistogramOpts, Opts, Registry, TextEncoder};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-use tokenizers::Tokenizer;
+use std::sync::Arc;
+use std::time::Duration;
+use thiserror::Error;
 use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::info;
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// Request/Response types
-#[derive(Debug, Deserialize)]
-struct SummarizeRequest {
-    text: String,
-    #[serde(default = "default_max_length")]
-    max_length: usize,
-    #[serde(default = "default_min_length")]
-    min_length: usize,
+// ============================================================================
+// Configuration
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub shimmy_url: String,
+    pub port: u16,
+    pub timeout_seconds: u64,
+    pub max_retries: u32,
 }
 
-fn default_max_length() -> usize {
-    100
+impl Config {
+    pub fn from_env() -> Self {
+        Self {
+            shimmy_url: std::env::var("SEMINSTRUCT_SHIMMY_URL")
+                .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+            port: std::env::var("SEMINSTRUCT_PORT")
+                .unwrap_or_else(|_| "8083".to_string())
+                .parse()
+                .unwrap_or(8083),
+            timeout_seconds: std::env::var("SEMINSTRUCT_TIMEOUT_SECONDS")
+                .unwrap_or_else(|_| "120".to_string())
+                .parse()
+                .unwrap_or(120),
+            max_retries: std::env::var("SEMINSTRUCT_MAX_RETRIES")
+                .unwrap_or_else(|_| "3".to_string())
+                .parse()
+                .unwrap_or(3),
+        }
+    }
 }
 
-fn default_min_length() -> usize {
-    20
+// ============================================================================
+// OpenAI-Compatible Request/Response Types
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChatCompletionRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChatCompletionResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChatChoice>,
+    pub usage: Usage,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChatChoice {
+    pub index: u32,
+    pub message: ChatMessage,
+    pub finish_reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Usage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub total_tokens: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelsResponse {
+    pub object: String,
+    pub data: Vec<ModelInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub owned_by: String,
 }
 
 #[derive(Debug, Serialize)]
-struct SummarizeResponse {
-    summary: String,
-    model: String,
-    latency_ms: f64,
+pub struct ErrorResponse {
+    pub error: ErrorDetail,
 }
 
 #[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: ErrorDetail,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorDetail {
-    message: String,
+pub struct ErrorDetail {
+    pub message: String,
     #[serde(rename = "type")]
-    error_type: String,
+    pub error_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-struct HealthResponse {
-    status: String,
-    model: String,
+pub struct HealthResponse {
+    pub status: String,
+    pub shimmy_url: String,
+    pub shimmy_healthy: bool,
 }
 
-// Application state
-struct AppState {
-    model: Mutex<ModelState>,
-    model_name: String,
+// ============================================================================
+// Shimmy Client
+// ============================================================================
+
+#[derive(Debug, Error)]
+pub enum ShimmyError {
+    #[error("HTTP request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("Shimmy returned error: {status} - {message}")]
+    ShimmyError { status: u16, message: String },
+    #[error("Shimmy is unavailable")]
+    Unavailable,
+}
+
+pub struct ShimmyClient {
+    client: Client,
+    base_url: String,
+    max_retries: u32,
+}
+
+impl ShimmyClient {
+    pub fn new(base_url: String, timeout: Duration, max_retries: u32) -> Self {
+        let client = Client::builder()
+            .timeout(timeout)
+            .pool_max_idle_per_host(10)
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self {
+            client,
+            base_url,
+            max_retries,
+        }
+    }
+
+    pub async fn chat_completions(
+        &self,
+        req: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ShimmyError> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+
+        let mut last_error = None;
+        for attempt in 0..=self.max_retries {
+            if attempt > 0 {
+                let backoff = Duration::from_millis(100 * (1 << attempt));
+                tokio::time::sleep(backoff).await;
+                warn!("Retrying shimmy request (attempt {})", attempt + 1);
+            }
+
+            match self.client.post(&url).json(req).send().await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        return response
+                            .json::<ChatCompletionResponse>()
+                            .await
+                            .map_err(ShimmyError::from);
+                    } else {
+                        let status = response.status().as_u16();
+                        let message = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Unknown error".to_string());
+                        last_error = Some(ShimmyError::ShimmyError { status, message });
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(ShimmyError::Request(e));
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or(ShimmyError::Unavailable))
+    }
+
+    pub async fn models(&self) -> Result<ModelsResponse, ShimmyError> {
+        let url = format!("{}/v1/models", self.base_url);
+
+        let response = self.client.get(&url).send().await?;
+
+        if response.status().is_success() {
+            response
+                .json::<ModelsResponse>()
+                .await
+                .map_err(ShimmyError::from)
+        } else {
+            let status = response.status().as_u16();
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            Err(ShimmyError::ShimmyError { status, message })
+        }
+    }
+
+    pub async fn health(&self) -> bool {
+        let url = format!("{}/health", self.base_url);
+        match self.client.get(&url).send().await {
+            Ok(response) => response.status().is_success(),
+            Err(_) => false,
+        }
+    }
+}
+
+// ============================================================================
+// Application State
+// ============================================================================
+
+pub struct AppState {
+    shimmy: ShimmyClient,
+    config: Config,
     metrics: Arc<Metrics>,
 }
 
-struct ModelState {
-    model: t5::T5ForConditionalGeneration,
-    tokenizer: Tokenizer,
-    device: Device,
-    config: t5::Config,
-    dtype: DType,
-}
+// ============================================================================
+// Metrics
+// ============================================================================
 
-impl ModelState {
-    fn load(model_id: &str) -> anyhow::Result<Self> {
-        info!("Loading model from HuggingFace: {}", model_id);
-
-        let device = Device::Cpu;
-        let dtype = DType::F32;
-
-        // Download model
-        let api = Api::new()?;
-        let api_repo = api.model(model_id.to_string());
-
-        info!("Downloading model files...");
-        let config_path = api_repo.get("config.json")?;
-        let tokenizer_path = api_repo.get("tokenizer.json")?;
-
-        // Try to get weights - handle both single file and sharded models
-        let weights_paths = match api_repo.get("model.safetensors") {
-            Ok(path) => vec![path],
-            Err(_) => {
-                // Try sharded model format
-                info!("Single safetensors not found, trying sharded format...");
-                let index_path = api_repo.get("model.safetensors.index.json")?;
-                let index: serde_json::Value = serde_json::from_slice(&std::fs::read(&index_path)?)?;
-                let weight_map = index["weight_map"].as_object()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid safetensors index"))?;
-
-                let mut files = std::collections::HashSet::new();
-                for file in weight_map.values() {
-                    if let Some(filename) = file.as_str() {
-                        files.insert(filename.to_string());
-                    }
-                }
-
-                let mut paths = Vec::new();
-                for file in files {
-                    paths.push(api_repo.get(&file)?);
-                }
-                paths
-            }
-        };
-
-        info!("Loading model into memory...");
-
-        // Load config
-        let config_str = std::fs::read_to_string(config_path)?;
-        let mut config: t5::Config = serde_json::from_str(&config_str)?;
-        config.use_cache = false; // Disable cache for debugging
-
-        // Load weights
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&weights_paths, dtype, &device)?
-        };
-        let model = t5::T5ForConditionalGeneration::load(vb, &config)?;
-
-        // Load tokenizer
-        let tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
-
-        info!("Model loaded successfully");
-
-        Ok(Self {
-            model,
-            tokenizer,
-            device,
-            config,
-            dtype,
-        })
-    }
-
-    fn generate(&mut self, prompt: &str, max_tokens: usize) -> anyhow::Result<String> {
-        // Tokenize input
-        let tokens = self
-            .tokenizer
-            .encode(prompt, true)
-            .map_err(|e| anyhow::anyhow!("Encoding failed: {}", e))?
-            .get_ids()
-            .to_vec();
-
-        let input_token_ids = Tensor::new(&tokens[..], &self.device)?.unsqueeze(0)?;
-
-        // Encode input using T5 encoder
-        let encoder_output = self.model.encode(&input_token_ids)?;
-
-        // Setup generation with low temperature for factual summaries
-        let temperature = Some(0.1); // Low temperature for deterministic, factual outputs
-        let top_p = None; // Disable nucleus sampling for consistency
-        let mut logits_processor = LogitsProcessor::new(299792458, temperature, top_p);
-
-        // Use EOS token from config
-        let eos_token = self.config.eos_token_id as u32;
-
-        // Start with decoder start token from config (defaults to 0 for T5)
-        let decoder_start_token = self.config.decoder_start_token_id.unwrap_or(0) as u32;
-        let mut output_token_ids = vec![decoder_start_token];
-
-        // Decoder generation loop
-        for index in 0..max_tokens {
-            // For T5 with cache: only pass last token after first iteration
-            let decoder_token_ids = if index == 0 || !self.config.use_cache {
-                Tensor::new(output_token_ids.as_slice(), &self.device)?.unsqueeze(0)?
-            } else {
-                let last_token = *output_token_ids.last().unwrap();
-                Tensor::new(&[last_token], &self.device)?.unsqueeze(0)?
-            };
-
-            // Decode and get logits
-            let logits = self.model.decode(&decoder_token_ids, &encoder_output)?
-                .squeeze(0)?;
-
-            // Apply repeat penalty to prevent repetition
-            let repeat_penalty = 1.1;
-            let repeat_last_n = 64;
-            let start_at = output_token_ids.len().saturating_sub(repeat_last_n);
-            let logits = candle_transformers::utils::apply_repeat_penalty(
-                &logits,
-                repeat_penalty,
-                &output_token_ids[start_at..],
-            )?;
-
-            let next_token = logits_processor.sample(&logits)?;
-
-            if next_token == eos_token {
-                break;
-            }
-
-            output_token_ids.push(next_token);
-        }
-
-        // Decode output (skip the start token)
-        let output_tokens = if output_token_ids.len() > 1 {
-            &output_token_ids[1..]
-        } else {
-            &[]
-        };
-
-        let summary = self
-            .tokenizer
-            .decode(output_tokens, true)
-            .map_err(|e| anyhow::anyhow!("Decoding failed: {}", e))?;
-
-        Ok(summary.trim().to_string())
-    }
-}
-
-// Prometheus metrics
-struct Metrics {
+pub struct Metrics {
     registry: Registry,
     requests_total: Counter,
     request_duration: Histogram,
     errors_total: Counter,
+    shimmy_errors: Counter,
 }
 
 impl Metrics {
-    fn new() -> anyhow::Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         let registry = Registry::new();
 
         let requests_total = Counter::with_opts(Opts::new(
-            "semsummarize_requests_total",
-            "Total number of summarization requests",
+            "seminstruct_requests_total",
+            "Total number of chat completion requests",
         ))?;
         registry.register(Box::new(requests_total.clone()))?;
 
         let request_duration = Histogram::with_opts(HistogramOpts::new(
-            "semsummarize_request_duration_seconds",
+            "seminstruct_request_duration_seconds",
             "Request duration in seconds",
         ))?;
         registry.register(Box::new(request_duration.clone()))?;
 
         let errors_total = Counter::with_opts(Opts::new(
-            "semsummarize_errors_total",
+            "seminstruct_errors_total",
             "Total number of errors",
         ))?;
         registry.register(Box::new(errors_total.clone()))?;
+
+        let shimmy_errors = Counter::with_opts(Opts::new(
+            "seminstruct_shimmy_errors_total",
+            "Total number of shimmy backend errors",
+        ))?;
+        registry.register(Box::new(shimmy_errors.clone()))?;
 
         Ok(Self {
             registry,
             requests_total,
             request_duration,
             errors_total,
+            shimmy_errors,
         })
     }
 }
+
+// ============================================================================
+// HTTP Handlers
+// ============================================================================
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -266,36 +305,45 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "semsummarize=info,tower_http=debug".into()),
+                .unwrap_or_else(|_| "seminstruct=info,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting semsummarize service");
+    info!("Starting seminstruct service (shimmy proxy)");
 
-    // Get config
-    let model_name = std::env::var("SEMSUMMARIZE_MODEL")
-        .unwrap_or_else(|_| "google/flan-t5-small".to_string());
-    let port = std::env::var("SEMSUMMARIZE_PORT")
-        .unwrap_or_else(|_| "8083".to_string())
-        .parse::<u16>()?;
+    // Load configuration
+    let config = Config::from_env();
+    info!("Configuration: shimmy_url={}, port={}", config.shimmy_url, config.port);
 
-    // Load model
-    let model = ModelState::load(&model_name)?;
+    // Create shimmy client
+    let shimmy = ShimmyClient::new(
+        config.shimmy_url.clone(),
+        Duration::from_secs(config.timeout_seconds),
+        config.max_retries,
+    );
+
+    // Check shimmy health on startup
+    if shimmy.health().await {
+        info!("Shimmy backend is healthy");
+    } else {
+        warn!("Shimmy backend is not responding - will retry on requests");
+    }
 
     // Initialize metrics
     let metrics = Arc::new(Metrics::new()?);
 
     // Create state
     let state = Arc::new(AppState {
-        model: Mutex::new(model),
-        model_name: model_name.clone(),
-        metrics: metrics.clone(),
+        shimmy,
+        config: config.clone(),
+        metrics,
     });
 
-    // Build router
+    // Build router with OpenAI-compatible endpoints
     let app = Router::new()
-        .route("/summarize", post(create_summary))
+        .route("/v1/chat/completions", post(chat_completions_handler))
+        .route("/v1/models", get(models_handler))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics_handler))
         .layer(CorsLayer::permissive())
@@ -303,8 +351,9 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     // Start server
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("0.0.0.0:{}", config.port);
     info!("Listening on {}", addr);
+    info!("Proxying to shimmy at {}", config.shimmy_url);
 
     let listener = TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
@@ -312,71 +361,108 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn create_summary(
+/// OpenAI-compatible chat completions endpoint (proxied to shimmy)
+async fn chat_completions_handler(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<SummarizeRequest>,
-) -> Result<Json<SummarizeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let start = std::time::Instant::now();
+    Json(req): Json<ChatCompletionRequest>,
+) -> Result<Json<ChatCompletionResponse>, (StatusCode, Json<ErrorResponse>)> {
     let timer = state.metrics.request_duration.start_timer();
     state.metrics.requests_total.inc();
 
-    // Validate input
-    if req.text.is_empty() {
+    // Validate request
+    if req.messages.is_empty() {
         state.metrics.errors_total.inc();
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: ErrorDetail {
-                    message: "Input text cannot be empty".to_string(),
+                    message: "Messages array cannot be empty".to_string(),
                     error_type: "invalid_request_error".to_string(),
+                    code: Some("invalid_messages".to_string()),
                 },
             }),
         ));
     }
 
-    // Build prompt - T5/Flan-T5 uses simple instruction format
-    // Limit to first 400 words to avoid overly long inputs
-    let text = req.text.split_whitespace().take(400).collect::<Vec<_>>().join(" ");
-    let prompt = format!("summarize: {}", text);
-
-    // Generate summary
-    let summary = {
-        let mut model = state.model.lock().unwrap();
-        match model.generate(&prompt, req.max_length.min(100)) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("Generation failed: {}", e);
-                state.metrics.errors_total.inc();
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: ErrorDetail {
-                            message: format!("Failed to generate summary: {}", e),
-                            error_type: "internal_error".to_string(),
-                        },
-                    }),
-                ));
-            }
+    // Proxy request to shimmy
+    match state.shimmy.chat_completions(&req).await {
+        Ok(response) => {
+            timer.observe_duration();
+            Ok(Json(response))
         }
-    };
+        Err(e) => {
+            error!("Shimmy request failed: {}", e);
+            state.metrics.errors_total.inc();
+            state.metrics.shimmy_errors.inc();
 
-    let latency_ms = start.elapsed().as_millis() as f64;
+            let (status, message) = match &e {
+                ShimmyError::ShimmyError { status, message } => {
+                    (StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY), message.clone())
+                }
+                ShimmyError::Unavailable => {
+                    (StatusCode::SERVICE_UNAVAILABLE, "Shimmy backend is unavailable".to_string())
+                }
+                ShimmyError::Request(req_err) => {
+                    if req_err.is_timeout() {
+                        (StatusCode::GATEWAY_TIMEOUT, "Request to shimmy timed out".to_string())
+                    } else {
+                        (StatusCode::BAD_GATEWAY, format!("Shimmy request failed: {}", req_err))
+                    }
+                }
+            };
 
-    let response = SummarizeResponse {
-        summary,
-        model: state.model_name.clone(),
-        latency_ms,
-    };
+            Err((
+                status,
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        message,
+                        error_type: "backend_error".to_string(),
+                        code: Some("shimmy_error".to_string()),
+                    },
+                }),
+            ))
+        }
+    }
+}
 
-    timer.observe_duration();
-    Ok(Json(response))
+/// List available models (proxied from shimmy)
+async fn models_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.shimmy.models().await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(e) => {
+            error!("Failed to get models from shimmy: {}", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: ErrorDetail {
+                        message: "Failed to get models from shimmy".to_string(),
+                        error_type: "backend_error".to_string(),
+                        code: Some("shimmy_error".to_string()),
+                    },
+                }),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(HealthResponse {
-        status: "healthy".to_string(),
-        model: state.model_name.clone(),
-    })
+    let shimmy_healthy = state.shimmy.health().await;
+
+    let status = if shimmy_healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(HealthResponse {
+            status: if shimmy_healthy { "healthy" } else { "degraded" }.to_string(),
+            shimmy_url: state.config.shimmy_url.clone(),
+            shimmy_healthy,
+        }),
+    )
 }
 
 async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -385,7 +471,7 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 
     let mut buffer = Vec::new();
     if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
-        tracing::error!("Failed to encode metrics: {}", e);
+        error!("Failed to encode metrics: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to encode metrics".to_string(),
@@ -395,11 +481,524 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     match String::from_utf8(buffer) {
         Ok(metrics) => (StatusCode::OK, metrics),
         Err(e) => {
-            tracing::error!("Failed to convert metrics to string: {}", e);
+            error!("Failed to convert metrics to string: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to convert metrics".to_string(),
             )
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------------------
+    // Config Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_config_defaults() {
+        // Clear any existing env vars
+        std::env::remove_var("SEMINSTRUCT_SHIMMY_URL");
+        std::env::remove_var("SEMINSTRUCT_PORT");
+        std::env::remove_var("SEMINSTRUCT_TIMEOUT_SECONDS");
+        std::env::remove_var("SEMINSTRUCT_MAX_RETRIES");
+
+        let config = Config::from_env();
+
+        assert_eq!(config.shimmy_url, "http://localhost:8080");
+        assert_eq!(config.port, 8083);
+        assert_eq!(config.timeout_seconds, 120);
+        assert_eq!(config.max_retries, 3);
+    }
+
+    #[test]
+    fn test_config_from_env() {
+        std::env::set_var("SEMINSTRUCT_SHIMMY_URL", "http://shimmy:9000");
+        std::env::set_var("SEMINSTRUCT_PORT", "9999");
+        std::env::set_var("SEMINSTRUCT_TIMEOUT_SECONDS", "60");
+        std::env::set_var("SEMINSTRUCT_MAX_RETRIES", "5");
+
+        let config = Config::from_env();
+
+        assert_eq!(config.shimmy_url, "http://shimmy:9000");
+        assert_eq!(config.port, 9999);
+        assert_eq!(config.timeout_seconds, 60);
+        assert_eq!(config.max_retries, 5);
+
+        // Cleanup
+        std::env::remove_var("SEMINSTRUCT_SHIMMY_URL");
+        std::env::remove_var("SEMINSTRUCT_PORT");
+        std::env::remove_var("SEMINSTRUCT_TIMEOUT_SECONDS");
+        std::env::remove_var("SEMINSTRUCT_MAX_RETRIES");
+    }
+
+    #[test]
+    fn test_config_invalid_port_uses_default() {
+        std::env::set_var("SEMINSTRUCT_PORT", "not_a_number");
+
+        let config = Config::from_env();
+
+        assert_eq!(config.port, 8083);
+
+        std::env::remove_var("SEMINSTRUCT_PORT");
+    }
+
+    #[test]
+    fn test_config_invalid_timeout_uses_default() {
+        std::env::set_var("SEMINSTRUCT_TIMEOUT_SECONDS", "invalid");
+
+        let config = Config::from_env();
+
+        assert_eq!(config.timeout_seconds, 120);
+
+        std::env::remove_var("SEMINSTRUCT_TIMEOUT_SECONDS");
+    }
+
+    // ------------------------------------------------------------------------
+    // ShimmyError Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_shimmy_error_display_shimmy_error() {
+        let err = ShimmyError::ShimmyError {
+            status: 500,
+            message: "Internal server error".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Shimmy returned error: 500 - Internal server error"
+        );
+    }
+
+    #[test]
+    fn test_shimmy_error_display_unavailable() {
+        let err = ShimmyError::Unavailable;
+        assert_eq!(err.to_string(), "Shimmy is unavailable");
+    }
+
+    // ------------------------------------------------------------------------
+    // Serialization Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_chat_completion_request_serialization() {
+        let req = ChatCompletionRequest {
+            model: "mistral-7b-instruct".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Hello!".to_string(),
+            }],
+            max_tokens: Some(100),
+            temperature: Some(0.7),
+            top_p: None,
+            stream: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ChatCompletionRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.model, "mistral-7b-instruct");
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].role, "user");
+        assert_eq!(parsed.messages[0].content, "Hello!");
+        assert_eq!(parsed.max_tokens, Some(100));
+        assert_eq!(parsed.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_chat_completion_request_deserialization_minimal() {
+        let json = r#"{
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": "Hi"}]
+        }"#;
+
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(req.model, "gpt-3.5-turbo");
+        assert_eq!(req.messages.len(), 1);
+        assert!(req.max_tokens.is_none());
+        assert!(req.temperature.is_none());
+        assert!(req.stream.is_none());
+    }
+
+    #[test]
+    fn test_chat_completion_response_serialization() {
+        let resp = ChatCompletionResponse {
+            id: "chatcmpl-123".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1699000000,
+            model: "mistral-7b-instruct".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "Hello! How can I help?".to_string(),
+                },
+                finish_reason: "stop".to_string(),
+            }],
+            usage: Usage {
+                prompt_tokens: 10,
+                completion_tokens: 20,
+                total_tokens: 30,
+            },
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("chatcmpl-123"));
+        assert!(json.contains("chat.completion"));
+        assert!(json.contains("Hello! How can I help?"));
+    }
+
+    #[test]
+    fn test_health_response_serialization() {
+        let resp = HealthResponse {
+            status: "healthy".to_string(),
+            shimmy_url: "http://shimmy:8080".to_string(),
+            shimmy_healthy: true,
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"status\":\"healthy\""));
+        assert!(json.contains("\"shimmy_healthy\":true"));
+    }
+
+    #[test]
+    fn test_error_response_serialization() {
+        let resp = ErrorResponse {
+            error: ErrorDetail {
+                message: "Something went wrong".to_string(),
+                error_type: "server_error".to_string(),
+                code: Some("internal_error".to_string()),
+            },
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"message\":\"Something went wrong\""));
+        assert!(json.contains("\"type\":\"server_error\""));
+        assert!(json.contains("\"code\":\"internal_error\""));
+    }
+
+    #[test]
+    fn test_error_response_without_code() {
+        let resp = ErrorResponse {
+            error: ErrorDetail {
+                message: "Error occurred".to_string(),
+                error_type: "invalid_request".to_string(),
+                code: None,
+            },
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("code"));
+    }
+
+    #[test]
+    fn test_models_response_deserialization() {
+        let json = r#"{
+            "object": "list",
+            "data": [
+                {
+                    "id": "mistral-7b-instruct",
+                    "object": "model",
+                    "created": 1699000000,
+                    "owned_by": "shimmy"
+                }
+            ]
+        }"#;
+
+        let resp: ModelsResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(resp.object, "list");
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.data[0].id, "mistral-7b-instruct");
+        assert_eq!(resp.data[0].owned_by, "shimmy");
+    }
+
+    // ------------------------------------------------------------------------
+    // Metrics Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_metrics_initialization() {
+        let metrics = Metrics::new().expect("Failed to create metrics");
+
+        // Increment counters to verify they work
+        metrics.requests_total.inc();
+        metrics.errors_total.inc();
+        metrics.shimmy_errors.inc();
+
+        // Observe histogram
+        let timer = metrics.request_duration.start_timer();
+        timer.observe_duration();
+
+        // Verify registry has metrics
+        let families = metrics.registry.gather();
+        assert!(!families.is_empty());
+    }
+
+    // ------------------------------------------------------------------------
+    // ShimmyClient Tests (with mockito)
+    // ------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_shimmy_client_health_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/health")
+            .with_status(200)
+            .with_body("OK")
+            .create_async()
+            .await;
+
+        let client = ShimmyClient::new(
+            server.url(),
+            Duration::from_secs(5),
+            3,
+        );
+
+        let healthy = client.health().await;
+        assert!(healthy);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_shimmy_client_health_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/health")
+            .with_status(503)
+            .create_async()
+            .await;
+
+        let client = ShimmyClient::new(
+            server.url(),
+            Duration::from_secs(5),
+            3,
+        );
+
+        let healthy = client.health().await;
+        assert!(!healthy);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_shimmy_client_health_connection_refused() {
+        // Use an invalid URL that won't connect
+        let client = ShimmyClient::new(
+            "http://127.0.0.1:1".to_string(),
+            Duration::from_millis(100),
+            0,
+        );
+
+        let healthy = client.health().await;
+        assert!(!healthy);
+    }
+
+    #[tokio::test]
+    async fn test_shimmy_client_models_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        let models_response = ModelsResponse {
+            object: "list".to_string(),
+            data: vec![ModelInfo {
+                id: "mistral-7b-instruct".to_string(),
+                object: "model".to_string(),
+                created: 1699000000,
+                owned_by: "shimmy".to_string(),
+            }],
+        };
+
+        let mock = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::to_string(&models_response).unwrap())
+            .create_async()
+            .await;
+
+        let client = ShimmyClient::new(
+            server.url(),
+            Duration::from_secs(5),
+            3,
+        );
+
+        let result = client.models().await;
+        assert!(result.is_ok());
+
+        let models = result.unwrap();
+        assert_eq!(models.data.len(), 1);
+        assert_eq!(models.data[0].id, "mistral-7b-instruct");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_shimmy_client_models_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/models")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let client = ShimmyClient::new(
+            server.url(),
+            Duration::from_secs(5),
+            3,
+        );
+
+        let result = client.models().await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            ShimmyError::ShimmyError { status, message } => {
+                assert_eq!(status, 500);
+                assert!(message.contains("Internal Server Error"));
+            }
+            _ => panic!("Expected ShimmyError"),
+        }
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_shimmy_client_chat_completions_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        let response = ChatCompletionResponse {
+            id: "chatcmpl-test123".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1699000000,
+            model: "mistral-7b-instruct".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "Hello! I'm here to help.".to_string(),
+                },
+                finish_reason: "stop".to_string(),
+            }],
+            usage: Usage {
+                prompt_tokens: 5,
+                completion_tokens: 10,
+                total_tokens: 15,
+            },
+        };
+
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::to_string(&response).unwrap())
+            .create_async()
+            .await;
+
+        let client = ShimmyClient::new(
+            server.url(),
+            Duration::from_secs(5),
+            3,
+        );
+
+        let request = ChatCompletionRequest {
+            model: "mistral-7b-instruct".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Hello!".to_string(),
+            }],
+            max_tokens: Some(100),
+            temperature: None,
+            top_p: None,
+            stream: None,
+        };
+
+        let result = client.chat_completions(&request).await;
+        assert!(result.is_ok());
+
+        let resp = result.unwrap();
+        assert_eq!(resp.id, "chatcmpl-test123");
+        assert_eq!(resp.choices.len(), 1);
+        assert_eq!(resp.choices[0].message.content, "Hello! I'm here to help.");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_shimmy_client_chat_completions_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(400)
+            .with_body("Bad Request: Invalid model")
+            .create_async()
+            .await;
+
+        let client = ShimmyClient::new(
+            server.url(),
+            Duration::from_secs(5),
+            0, // No retries for faster test
+        );
+
+        let request = ChatCompletionRequest {
+            model: "invalid-model".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Hello!".to_string(),
+            }],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: None,
+        };
+
+        let result = client.chat_completions(&request).await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            ShimmyError::ShimmyError { status, message } => {
+                assert_eq!(status, 400);
+                assert!(message.contains("Invalid model"));
+            }
+            _ => panic!("Expected ShimmyError"),
+        }
+        mock.assert_async().await;
+    }
+
+    // ------------------------------------------------------------------------
+    // Request Validation Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_empty_messages_detected() {
+        let req = ChatCompletionRequest {
+            model: "mistral-7b-instruct".to_string(),
+            messages: vec![], // Empty!
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stream: None,
+        };
+
+        assert!(req.messages.is_empty());
+    }
+
+    // ------------------------------------------------------------------------
+    // ShimmyClient Unit Tests (without HTTP mocking)
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_shimmy_client_creation() {
+        let client = ShimmyClient::new(
+            "http://localhost:8080".to_string(),
+            Duration::from_secs(30),
+            5,
+        );
+
+        assert_eq!(client.base_url, "http://localhost:8080");
+        assert_eq!(client.max_retries, 5);
     }
 }

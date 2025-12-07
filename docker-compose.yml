@@ -1,49 +1,73 @@
-# SemSummarize - Local Development
-# Standalone docker-compose for testing semsummarize without full SemStreams stack
-
-version: '3.8'
+# SemInstruct - Local Development
+# Lightweight proxy to shimmy for OpenAI-compatible inference
+# seminstruct proxies requests to shimmy which handles actual model inference
 
 services:
-  semsummarize:
+  # Lightweight proxy service (~256MB memory)
+  seminstruct:
     build:
       context: .
       dockerfile: Dockerfile
-    image: semstreams-semsummarize:dev
-    container_name: semsummarize-dev
+    image: semstreams-seminstruct:dev
+    container_name: seminstruct-dev
     ports:
       - "8083:8083"
     environment:
-      # Model configuration
-      - SEMSUMMARIZE_MODEL=google/flan-t5-small  # 77M params, fast
-      # Alternative models:
-      # - SEMSUMMARIZE_MODEL=google/flan-t5-base  # 250M params, higher quality
-      # - SEMSUMMARIZE_MODEL=facebook/bart-base   # 140M params, narrative style
-
-      # Server configuration
-      - SEMSUMMARIZE_PORT=8083
-
+      # Shimmy backend configuration
+      - SEMINSTRUCT_SHIMMY_URL=http://shimmy:8080
+      - SEMINSTRUCT_PORT=8083
+      - SEMINSTRUCT_TIMEOUT_SECONDS=120
+      - SEMINSTRUCT_MAX_RETRIES=3
       # Logging
-      - RUST_LOG=info  # Options: debug, info, warn, error
-    volumes:
-      # Persist model cache to avoid re-downloading
-      - semsummarize-cache:/home/semsummarize/.cache/huggingface
+      - RUST_LOG=info
+    depends_on:
+      shimmy:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
-      interval: 10s
+      interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 60s  # Allow time for model download
+      start_period: 10s  # Fast startup - no model loading
     restart: unless-stopped
-    # Resource limits
     deploy:
       resources:
         limits:
-          memory: 1G
-          cpus: '2.0'
+          memory: 256M
+          cpus: '1.0'
         reservations:
-          memory: 512M
-          cpus: '0.5'
+          memory: 64M
+          cpus: '0.25'
+
+  # Shimmy inference backend (heavy lifting)
+  shimmy:
+    image: ghcr.io/michael-a-kuykendall/shimmy:latest
+    container_name: shimmy-dev
+    ports:
+      - "8080:8080"
+    environment:
+      # Model configuration
+      - SHIMMY_MODEL=mistral-7b-instruct
+      - SHIMMY_PORT=8080
+    volumes:
+      # Persist model cache to avoid re-downloading
+      - shimmy-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s  # Allow time for model download
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 10G
+          cpus: '4.0'
+        reservations:
+          memory: 6G
+          cpus: '2.0'
 
 volumes:
-  semsummarize-cache:
+  shimmy-cache:
     driver: local

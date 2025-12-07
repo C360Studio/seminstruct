@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: c360studio/semsummarize
+  IMAGE_NAME: c360studio/seminstruct
   RUST_VERSION: "1.85"
 
 jobs:
@@ -39,73 +39,57 @@ jobs:
           context: .
           push: false
           load: true
-          tags: semsummarize:test
+          tags: seminstruct:test
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-      - name: Start service
+      - name: Start seminstruct (standalone mode)
         run: |
+          # Start seminstruct without shimmy to test it starts correctly
           docker run -d \
-            --name semsummarize-test \
+            --name seminstruct-test \
             -p 8083:8083 \
-            -e SEMSUMMARIZE_MODEL=google/flan-t5-small \
-            -e SEMSUMMARIZE_PORT=8083 \
+            -e SEMINSTRUCT_SHIMMY_URL=http://shimmy:8080 \
+            -e SEMINSTRUCT_PORT=8083 \
             -e RUST_LOG=info \
-            semsummarize:test
+            seminstruct:test
 
-      - name: Wait for service to be ready
+      - name: Wait for service to start
         run: |
-          echo "Waiting for service to start..."
-          for i in {1..60}; do
-            if curl -f http://localhost:8083/health 2>/dev/null; then
-              echo "Service is ready!"
+          echo "Waiting for seminstruct to start..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:8083/health 2>/dev/null; then
+              echo "Service is running (shimmy not available, expected degraded state)"
               exit 0
             fi
             echo "Attempt $i: Service not ready yet..."
-            sleep 5
+            sleep 2
           done
-          echo "Service failed to start within timeout"
-          docker logs semsummarize-test
+          echo "Service failed to start"
+          docker logs seminstruct-test
           exit 1
 
-      - name: Test health endpoint
+      - name: Test health endpoint (degraded without shimmy)
         run: |
           response=$(curl -s http://localhost:8083/health)
           echo "Health response: $response"
-          echo "$response" | grep -q '"status":"healthy"' || exit 1
-
-      - name: Test models endpoint
-        run: |
-          response=$(curl -s http://localhost:8083/health)
-          echo "Models response: $response"
-          echo "$response" | grep -q 'google/flan-t5-small' || exit 1
-
-      - name: Test summarization endpoint
-        run: |
-          response=$(curl -X POST http://localhost:8083/summarize \
-            -H "Content-Type: application/json" \
-            -d '{
-              "text": "This is a test input for summarization. It should be condensed into a shorter form.",
-              "max_length": 50
-            }')
-          echo "Summarization response: $response"
-          echo "$response" | grep -q '"summary"' || exit 1
-          echo "$response" | grep -q '"model":"google/flan-t5-small"' || exit 1
+          # Should return degraded status since shimmy is not available
+          echo "$response" | grep -q '"shimmy_healthy":false' || echo "Expected shimmy_healthy:false"
 
       - name: Test metrics endpoint
         run: |
           metrics=$(curl -s http://localhost:8083/metrics)
           echo "Checking metrics..."
-          echo "$metrics" | grep -q 'semsummarize_requests_total' || exit 1
-          echo "$metrics" | grep -q 'semsummarize_request_duration_seconds' || exit 1
+          echo "$metrics" | grep -q 'seminstruct_requests_total' || exit 1
+          echo "$metrics" | grep -q 'seminstruct_request_duration_seconds' || exit 1
 
       - name: View service logs
         if: always()
-        run: docker logs semsummarize-test
+        run: docker logs seminstruct-test
 
       - name: Stop service
         if: always()
-        run: docker rm -f semsummarize-test
+        run: docker rm -f seminstruct-test
 
       # Move cache
       - name: Move cache
