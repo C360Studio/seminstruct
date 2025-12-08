@@ -45,19 +45,19 @@ docker compose down
 
 ## Model Sizes
 
-Default is TinyLlama-1.1B (~660MB) for CI. Override for production:
+Default is Qwen2.5-0.5B (~491MB), ideal for edge devices. Override for more resources:
 
-| Tier | Model | Size | Usage |
-|------|-------|------|-------|
-| CI (default) | TinyLlama-1.1B Q4_K_M | ~660MB | Default, fits GitHub Actions |
-| Dev | Mistral-7B Q4_K_M | ~4.1GB | Good balance for local dev |
-| Prod | Mistral-7B Q6_K | ~5.5GB | Production quality |
+| Resources | Model | Size | Notes |
+|-----------|-------|------|-------|
+| Edge / <1GB RAM | Qwen2.5-0.5B Q4_K_M | ~491MB | Default, great coherence |
+| ~4GB RAM | Mistral-7B Q4_K_M | ~4.1GB | Good balance |
+| ~6GB+ RAM | Mistral-7B Q6_K | ~5.5GB | Higher quality |
 
 ```bash
-# Default (TinyLlama for CI)
+# Default (Qwen2.5-0.5B for edge/CI)
 docker compose build
 
-# Production with Mistral-7B
+# With more resources (~4GB)
 MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
 MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
 docker compose build
@@ -144,7 +144,7 @@ lsof -i :11435  # shimmy
 
 **Service URL**: `http://localhost:8083`
 
-**Backend**: shimmy (Mistral-7B-Instruct-v0.2 GGUF)
+**Backend**: shimmy (Qwen2.5-0.5B default, configurable)
 
 **Expected Latency**: 300-500ms per response
 

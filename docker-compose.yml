@@ -44,15 +44,15 @@ services:
       context: .
       dockerfile: Dockerfile.shimmy
       args:
-        # Model tiers:
-        # CI:     TinyLlama-1.1B Q4_K_M (~660MB) - default, fits GitHub Actions
-        # Dev:    Mistral-7B Q4_K_M (~4.1GB) - good local balance
-        # Prod:   Mistral-7B Q6_K (~5.5GB) - production quality
+        # Model tiers by resources:
+        # Edge/<1GB:  Qwen2.5-0.5B Q4_K_M (~491MB) - default
+        # ~4GB RAM:   Mistral-7B Q4_K_M (~4.1GB)
+        # ~6GB+ RAM:  Mistral-7B Q6_K (~5.5GB)
         #
-        # Override: MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf docker compose build
-        #           MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF
-        MODEL_REPO: ${MODEL_REPO:-TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF}
-        MODEL_FILE: ${MODEL_FILE:-tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf}
+        # Override: MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
+        #           MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf docker compose build
+        MODEL_REPO: ${MODEL_REPO:-Qwen/Qwen2.5-0.5B-Instruct-GGUF}
+        MODEL_FILE: ${MODEL_FILE:-qwen2.5-0.5b-instruct-q4_k_m.gguf}
     image: shimmy:local
     container_name: shimmy-dev
     ports:

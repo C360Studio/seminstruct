@@ -32,7 +32,7 @@ jobs:
 
       - name: Start services
         run: |
-          echo "Starting services with small model (Qwen2-0.5B)..."
+          echo "Starting services with small model (Qwen2.5-0.5B)..."
           docker compose up -d
 
       - name: Wait for shimmy model load
@@ -84,10 +84,10 @@ jobs:
           # Get available models from shimmy
           models=$(curl -s http://localhost:8083/v1/models)
           echo "Available models: $models"
-          # Find tinyllama model (shimmy may list default phi3-lora first)
-          model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("tinyllama")) | .id' | head -1)
+          # Find qwen model (shimmy may list default phi3-lora first)
+          model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("qwen")) | .id' | head -1)
           if [ -z "$model_id" ]; then
-            # Fallback to last model if tinyllama not found
+            # Fallback to last model if qwen not found
             model_id=$(echo "$models" | jq -r '.data[-1].id // empty')
           fi
           echo "Selected model: $model_id"

@@ -29,10 +29,10 @@ RUN pip install --no-cache-dir huggingface-hub
 WORKDIR /models
 
 # Build args for model selection
-# CI default: TinyLlama-1.1B Q4_K_M (~660MB) - small enough for GitHub Actions
-# Production: Override with Mistral-7B variants for better quality
-ARG MODEL_REPO=TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF
-ARG MODEL_FILE=tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+# Default: Qwen2.5-0.5B Q4_K_M (~491MB) - ideal for edge devices and CI
+# Override with Mistral-7B variants for more resources (~4-6GB)
+ARG MODEL_REPO=Qwen/Qwen2.5-0.5B-Instruct-GGUF
+ARG MODEL_FILE=qwen2.5-0.5b-instruct-q4_k_m.gguf
 
 RUN python -c "from huggingface_hub import hf_hub_download; hf_hub_download('${MODEL_REPO}', '${MODEL_FILE}', local_dir='.', local_dir_use_symlinks=False)"
 

@@ -89,7 +89,7 @@ tasks:
       - |
         models=$(curl -s http://localhost:{{.PORT}}/v1/models)
         echo "Available models: $models"
-        model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("tinyllama") or contains("mistral")) | .id' | head -1)
+        model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("qwen") or contains("mistral")) | .id' | head -1)
         [ -z "$model_id" ] && model_id=$(echo "$models" | jq -r '.data[-1].id // "test"')
         echo "Using model: $model_id"
         curl -s http://localhost:{{.PORT}}/v1/chat/completions \
@@ -107,7 +107,7 @@ tasks:
       - |
         models=$(curl -s http://localhost:{{.PORT}}/v1/models)
         echo "Available models: $models"
-        model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("tinyllama") or contains("mistral")) | .id' | head -1)
+        model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("qwen") or contains("mistral")) | .id' | head -1)
         [ -z "$model_id" ] && model_id=$(echo "$models" | jq -r '.data[-1].id // "test"')
         echo "Using model: $model_id"
         curl -s http://localhost:{{.PORT}}/v1/chat/completions \

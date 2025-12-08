@@ -27,6 +27,26 @@ SemInstruct exists to decouple your application from the inference backend:
 4. **Health Monitoring** - Aggregated health checks report backend availability
 5. **Fast Startup** - No model loading means instant restarts and scaling
 
+## Why Not MCP?
+
+You might wonder why SemInstruct uses a traditional HTTP proxy instead of [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
+
+**Use Case**: SemInstruct serves [SemStreams](https://github.com/c360studio/semstreams), a streaming data processing system. SemStreams graph nodes make inference requests during stream processing - they already have all the context they need from the data flowing through the graph.
+
+**Why HTTP fits better**:
+
+1. **Stateless by Design** - Each inference request is self-contained. SemStreams nodes pass complete context (document text, classification labels, etc.) in each request. No conversation history or tool discovery needed.
+
+2. **No Tool Orchestration** - MCP excels when an LLM needs to discover and invoke tools dynamically. SemStreams nodes know exactly what they need - extract entities, classify text, summarize content - and include all inputs in the request.
+
+3. **Streaming Architecture** - Requests arrive from NATS streams at high throughput. HTTP's request/response model maps cleanly to stream processing semantics.
+
+4. **Backend Flexibility** - The OpenAI-compatible API lets you swap backends (shimmy → Ollama → OpenAI → vLLM) without code changes. MCP would tie you to a specific protocol.
+
+**When MCP makes sense**: Interactive assistants, agentic workflows with tool use, or applications where the LLM needs to discover capabilities at runtime.
+
+**When HTTP makes sense**: Batch processing, stream processing, or any workload where the caller knows exactly what inference it needs and provides complete context per request.
+
 ## Architecture
 
 ```text
@@ -252,5 +272,5 @@ MIT
 ---
 
 **Port**: `8083`
-**Backend**: shimmy (Mistral-7B-Instruct)
+**Backend**: shimmy (Qwen2.5-0.5B default, configurable)
 **API**: OpenAI-compatible `/v1/chat/completions`
