@@ -84,26 +84,20 @@ jobs:
           # Get available models from shimmy
           models=$(curl -s http://localhost:8083/v1/models)
           echo "Available models: $models"
-          model_id=$(echo "$models" | jq -r '.data[0].id // empty')
+          # Find tinyllama model (shimmy may list default phi3-lora first)
+          model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("tinyllama")) | .id' | head -1)
           if [ -z "$model_id" ]; then
-            echo "No models available, testing error handling..."
-            response=$(curl -s http://localhost:8083/v1/chat/completions \
-              -H "Content-Type: application/json" \
-              -d '{"model":"test","messages":[{"role":"user","content":"Hello"}],"max_tokens":10,"stream":false}')
-            echo "Response: $response"
-            # Verify we get a valid JSON response (proxy is working)
-            echo "$response" | jq . || (echo "Invalid JSON response" && exit 1)
-            echo "Proxy error handling works!"
-          else
-            echo "Testing with model: $model_id"
-            response=$(curl -s http://localhost:8083/v1/chat/completions \
-              -H "Content-Type: application/json" \
-              -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20,\"stream\":false}")
-            echo "Response: $response"
-            # Verify we get valid JSON with actual content
-            echo "$response" | jq -e '.choices[0].message.content' || (echo "No content in response" && exit 1)
-            echo "Integration test passed!"
+            # Fallback to last model if tinyllama not found
+            model_id=$(echo "$models" | jq -r '.data[-1].id // empty')
           fi
+          echo "Selected model: $model_id"
+          response=$(curl -s http://localhost:8083/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20,\"stream\":false}")
+          echo "Response: $response"
+          # Verify we get valid JSON with actual content
+          echo "$response" | jq -e '.choices[0].message.content' || (echo "No content in response" && exit 1)
+          echo "Integration test passed!"
 
       - name: View shimmy logs
         if: always()
