@@ -173,6 +173,13 @@ impl ShimmyClient {
     ) -> Result<ChatCompletionResponse, ShimmyError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
 
+        // Force non-streaming - proxy doesn't support streaming responses yet
+        if req.stream == Some(true) {
+            warn!("Client requested streaming but proxy doesn't support it - forcing non-streaming");
+        }
+        let mut request = req.clone();
+        request.stream = Some(false);
+
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
             if attempt > 0 {
@@ -181,7 +188,7 @@ impl ShimmyClient {
                 warn!("Retrying shimmy request (attempt {})", attempt + 1);
             }
 
-            match self.client.post(&url).json(req).send().await {
+            match self.client.post(&url).json(&request).send().await {
                 Ok(response) => {
                     if response.status().is_success() {
                         return response
