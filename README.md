@@ -68,20 +68,22 @@ You might wonder why SemInstruct uses a traditional HTTP proxy instead of [Model
 ## Quick Start
 
 ```bash
-# Build and run (starts both seminstruct and shimmy)
+# Start services (pulls pre-built images from GHCR)
 docker compose up -d
 
-# Wait for shimmy to download model (~4GB, first time only)
+# Wait for services to be ready (~30s)
 docker compose logs -f shimmy
 
 # Test with curl
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "mistral-7b-instruct",
+    "model": "qwen2.5-0.5b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
+
+No build required - images are pulled from `ghcr.io/c360studio/semshimmy`.
 
 ## API Reference
 
@@ -213,9 +215,9 @@ curl http://localhost:8083/v1/chat/completions \
 
 | Metric | seminstruct | shimmy |
 |--------|-------------|--------|
-| Memory | ~256MB | ~6-8GB |
-| Startup | <1s | 30-300s (model load) |
-| Container Size | ~50MB | ~4GB |
+| Memory | ~256MB | ~1-2GB (Qwen2.5-0.5B) |
+| Startup | <1s | ~30s (model already loaded) |
+| Container Size | ~50MB | ~600MB |
 
 ## Docker Deployment
 
@@ -225,27 +227,34 @@ curl http://localhost:8083/v1/chat/completions \
 docker compose up -d
 ```
 
-This starts both seminstruct and shimmy with proper health checks.
+This pulls pre-built images from GHCR and starts both services.
 
 ### Manual
 
 ```bash
-# Start shimmy first
+# Start shimmy first (pre-built with Qwen2.5-0.5B)
 docker run -d \
   --name shimmy \
-  -p 8080:8080 \
-  -v shimmy-cache:/root/.cache/huggingface \
-  ghcr.io/michael-a-kuykendall/shimmy:latest
+  -p 11435:11435 \
+  ghcr.io/c360studio/semshimmy:latest
 
 # Then start seminstruct
-docker build -t seminstruct:latest .
-
 docker run -d \
   --name seminstruct \
   -p 8083:8083 \
-  -e SEMINSTRUCT_SHIMMY_URL=http://shimmy:8080 \
+  -e SEMINSTRUCT_SHIMMY_URL=http://shimmy:11435 \
   --link shimmy \
-  seminstruct:latest
+  ghcr.io/c360studio/seminstruct:latest
+```
+
+### Custom Models
+
+To use a different model, build with Dockerfile.shimmy:
+
+```bash
+MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
+MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
+docker build -f Dockerfile.shimmy -t shimmy:custom .
 ```
 
 ## Project Structure
@@ -254,8 +263,10 @@ docker run -d \
 seminstruct/
 ├── Cargo.toml              # Dependencies (axum, reqwest, etc.)
 ├── src/main.rs             # HTTP proxy + shimmy client
-├── Dockerfile              # 2-stage build
-├── docker-compose.yml      # seminstruct + shimmy stack
+├── Dockerfile              # seminstruct build (2-stage)
+├── Dockerfile.shimmy       # Custom model builds
+├── docker-compose.yml      # Uses pre-built GHCR images
+├── docker-compose.ci.yml   # CI override (builds from source)
 └── README.md
 ```
 

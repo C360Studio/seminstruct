@@ -37,23 +37,11 @@ services:
           memory: 64M
           cpus: '0.25'
 
-  # Shimmy inference backend with baked-in GGUF model
-  # Model is downloaded at build time, not runtime
+  # Shimmy inference backend with Qwen2.5-0.5B baked in
+  # Pre-built image from GHCR - no build required
+  # For custom models, use Dockerfile.shimmy instead
   shimmy:
-    build:
-      context: .
-      dockerfile: Dockerfile.shimmy
-      args:
-        # Model tiers by resources:
-        # Edge/<1GB:  Qwen2.5-0.5B Q4_K_M (~491MB) - default
-        # ~4GB RAM:   Mistral-7B Q4_K_M (~4.1GB)
-        # ~6GB+ RAM:  Mistral-7B Q6_K (~5.5GB)
-        #
-        # Override: MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
-        #           MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf docker compose build
-        MODEL_REPO: ${MODEL_REPO:-Qwen/Qwen2.5-0.5B-Instruct-GGUF}
-        MODEL_FILE: ${MODEL_FILE:-qwen2.5-0.5b-instruct-q4_k_m.gguf}
-    image: shimmy:local
+    image: ghcr.io/c360studio/semshimmy:latest
     container_name: shimmy-dev
     ports:
       - "11435:11435"
@@ -62,13 +50,13 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s  # Model baked in, just needs to load
+      start_period: 30s  # Model already loaded in image
     restart: unless-stopped
     deploy:
       resources:
         limits:
-          memory: 10G
+          memory: 2G
           cpus: '4.0'
         reservations:
-          memory: 4G
-          cpus: '2.0'
+          memory: 1G
+          cpus: '1.0'

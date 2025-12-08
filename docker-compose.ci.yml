@@ -1,0 +1,12 @@
+# CI override - builds shimmy from source for testing
+# Usage: docker compose -f docker-compose.yml -f docker-compose.ci.yml build
+
+services:
+  shimmy:
+    build:
+      context: .
+      dockerfile: Dockerfile.shimmy
+      args:
+        MODEL_REPO: Qwen/Qwen2.5-0.5B-Instruct-GGUF
+        MODEL_FILE: qwen2.5-0.5b-instruct-q4_k_m.gguf
+    image: shimmy:ci

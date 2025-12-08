@@ -1,5 +1,12 @@
-# Shimmy build with GGUF model baked in
-# Downloads model at build time for instant startup
+# Shimmy build with custom GGUF model baked in
+#
+# For default Qwen2.5-0.5B, use the pre-built image instead:
+#   docker pull ghcr.io/c360studio/semshimmy:latest
+#
+# Use this Dockerfile to bake in a different model:
+#   MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
+#   MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
+#   docker build -f Dockerfile.shimmy -t shimmy:custom .
 
 FROM rust:1.85-slim AS builder
 

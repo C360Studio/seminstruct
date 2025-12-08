@@ -1,10 +1,10 @@
 # SemInstruct Quick Start
 
-**No Rust installation needed - everything runs in Docker!**
+**No build required - pre-built images from GHCR!**
 
 ## Prerequisites
 
-- Docker (with 2GB+ available memory for default model)
+- Docker (with 2GB+ available memory)
 - [Task](https://taskfile.dev/#/installation) (optional but recommended)
 
 ```bash
@@ -16,16 +16,13 @@ go install github.com/go-task/task/v3/cmd/task@latest  # Go
 
 ## Quick Start
 
-> **First run takes longer** (~10-15 min) to build shimmy from source and download model.
-> Subsequent runs are fast with cached builds.
-
 ```bash
 cd seminstruct
 
-# 1. Build and run (builds shimmy from source + starts services)
+# 1. Start services (pulls pre-built images)
 docker compose up -d
 
-# 2. Wait for shimmy to download model
+# 2. Wait for services to be ready (~30s)
 docker compose logs -f shimmy
 
 # 3. Test chat completions (OpenAI-compatible)
@@ -43,24 +40,25 @@ docker compose logs -f
 docker compose down
 ```
 
-## Model Sizes
+No build required - images are pulled from `ghcr.io/c360studio/semshimmy`.
 
-Default is Qwen2.5-0.5B (~491MB), ideal for edge devices. Override for more resources:
+## Custom Models
+
+Default image uses Qwen2.5-0.5B (~491MB). For larger models, build with Dockerfile.shimmy:
 
 | Resources | Model | Size | Notes |
 |-----------|-------|------|-------|
-| Edge / <1GB RAM | Qwen2.5-0.5B Q4_K_M | ~491MB | Default, great coherence |
+| Edge / <1GB RAM | Qwen2.5-0.5B Q4_K_M | ~491MB | Default (pre-built) |
 | ~4GB RAM | Mistral-7B Q4_K_M | ~4.1GB | Good balance |
 | ~6GB+ RAM | Mistral-7B Q6_K | ~5.5GB | Higher quality |
 
 ```bash
-# Default (Qwen2.5-0.5B for edge/CI)
-docker compose build
-
-# With more resources (~4GB)
+# Build custom model image
 MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
 MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
-docker compose build
+docker build -f Dockerfile.shimmy -t shimmy:custom .
+
+# Then update docker-compose.yml to use shimmy:custom
 ```
 
 ## Architecture
@@ -79,10 +77,10 @@ docker compose build
 ## Docker Compose Workflow
 
 ```bash
-# Start both services
+# Start both services (pulls pre-built images)
 docker compose up -d
 
-# Check shimmy status (model loading)
+# Check shimmy status
 docker compose logs -f shimmy
 
 # Check seminstruct status
@@ -111,7 +109,7 @@ docker compose up -d
 ### Shimmy not healthy
 
 ```bash
-# Wait for model download (~4GB, can take several minutes)
+# Check shimmy logs
 docker compose logs -f shimmy
 
 # Check health directly

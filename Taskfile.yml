@@ -52,8 +52,8 @@ tasks:
     desc: Run full integration tests locally (run before push!)
     cmds:
       - echo "Building services (shimmy from source)..."
-      - docker compose build
-      - docker compose up -d
+      - docker compose -f docker-compose.yml -f docker-compose.ci.yml build
+      - docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
       - |
         echo "Waiting for shimmy..."
         for i in $(seq 1 90); do
@@ -96,7 +96,7 @@ tasks:
           -H "Content-Type: application/json" \
           -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20,\"stream\":false}" | jq .
       - echo "=== Integration tests passed! ==="
-      - docker compose down
+      - docker compose -f docker-compose.yml -f docker-compose.ci.yml down
 
   integration:quick:
     desc: Run integration tests (services already running)
