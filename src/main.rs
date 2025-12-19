@@ -250,8 +250,9 @@ impl ShimmyClient {
     /// Check if shimmy is ready to serve inference requests.
     /// Performs a lightweight inference call to verify the model is loaded.
     pub async fn ready(&self) -> bool {
+        // Use qwen model for readiness check - it's small and always available in CI
         let request = ChatCompletionRequest {
-            model: "default".to_string(),
+            model: "qwen2.5-0.5b-instruct-q4-k-m".to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "hi".to_string(),
