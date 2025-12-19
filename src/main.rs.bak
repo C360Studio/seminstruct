@@ -132,12 +132,6 @@ pub struct HealthResponse {
     pub shimmy_healthy: bool,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ReadyResponse {
-    pub ready: bool,
-    pub shimmy_url: String,
-}
-
 // ============================================================================
 // Shimmy Client
 // ============================================================================
@@ -244,30 +238,6 @@ impl ShimmyClient {
         match self.client.get(&url).send().await {
             Ok(response) => response.status().is_success(),
             Err(_) => false,
-        }
-    }
-
-    /// Check if shimmy is ready to serve inference requests.
-    /// Performs a lightweight inference call to verify the model is loaded.
-    pub async fn ready(&self) -> bool {
-        let request = ChatCompletionRequest {
-            model: "default".to_string(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "hi".to_string(),
-            }],
-            max_tokens: Some(1),
-            temperature: None,
-            top_p: None,
-            stream: Some(false),
-        };
-
-        match self.chat_completions(&request).await {
-            Ok(_) => true,
-            Err(e) => {
-                warn!("Shimmy readiness check failed: {}", e);
-                false
-            }
         }
     }
 }
@@ -382,7 +352,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/chat/completions", post(chat_completions_handler))
         .route("/v1/models", get(models_handler))
         .route("/health", get(health_check))
-        .route("/ready", get(ready_check))
         .route("/metrics", get(metrics_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -494,26 +463,6 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             status: if shimmy_healthy { "healthy" } else { "degraded" }.to_string(),
             shimmy_url: state.config.shimmy_url.clone(),
             shimmy_healthy,
-        }),
-    )
-}
-
-/// Readiness check - returns 200 only when shimmy can complete inference.
-/// Use this for Kubernetes readiness probes.
-async fn ready_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let ready = state.shimmy.ready().await;
-
-    let status = if ready {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-
-    (
-        status,
-        Json(ReadyResponse {
-            ready,
-            shimmy_url: state.config.shimmy_url.clone(),
         }),
     )
 }
