@@ -71,6 +71,13 @@ jobs:
           echo "Health response: $response"
           echo "$response" | grep -q '"shimmy_healthy":true' || (echo "Expected shimmy_healthy:true" && exit 1)
 
+      - name: Test ready endpoint
+        run: |
+          response=$(curl -s http://localhost:8083/ready)
+          echo "Ready response: $response"
+          # Should return 200 with ready:true after model is loaded
+          echo "$response" | grep -q '"ready":true' || (echo "Expected ready:true" && exit 1)
+
       - name: Test metrics endpoint
         run: |
           metrics=$(curl -s http://localhost:8083/metrics)
