@@ -71,12 +71,20 @@ jobs:
           echo "Health response: $response"
           echo "$response" | grep -q '"shimmy_healthy":true' || (echo "Expected shimmy_healthy:true" && exit 1)
 
-      - name: Test ready endpoint
+      - name: Test ready endpoint (waits for model load)
         run: |
-          response=$(curl -s http://localhost:8083/ready)
-          echo "Ready response: $response"
-          # Should return 200 with ready:true after model is loaded
-          echo "$response" | grep -q '"ready":true' || (echo "Expected ready:true" && exit 1)
+          echo "Waiting for shimmy model to load via /ready endpoint..."
+          for i in {1..60}; do
+            response=$(curl -s http://localhost:8083/ready)
+            echo "Attempt $i/60: $response"
+            if echo "$response" | grep -q '"ready":true'; then
+              echo "Seminstruct is ready for inference!"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Seminstruct /ready never returned ready:true after 5 minutes"
+          exit 1
 
       - name: Test metrics endpoint
         run: |
