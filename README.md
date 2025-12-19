@@ -19,7 +19,7 @@ SemInstruct is a lightweight proxy service that provides an OpenAI-compatible AP
 
 ## Why a Proxy?
 
-SemInstruct exists to decouple your application from the inference backend:
+SemInstruct exists to decouple your SemStreams application from the inference backend:
 
 1. **Backend Flexibility** - Swap shimmy for OpenAI, Ollama, or any OpenAI-compatible service without code changes
 2. **Reliability** - Built-in retry logic with exponential backoff handles transient failures
