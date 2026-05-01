@@ -551,6 +551,16 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serializes tests that mutate process env vars. Cargo runs tests in
+    // parallel by default, and SEMINSTRUCT_* vars set by one test would
+    // leak into another's Config::from_env() read.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     // ------------------------------------------------------------------------
     // Config Tests
@@ -558,7 +568,7 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        // Clear any existing env vars
+        let _guard = env_guard();
         std::env::remove_var("SEMINSTRUCT_SHIMMY_URL");
         std::env::remove_var("SEMINSTRUCT_PORT");
         std::env::remove_var("SEMINSTRUCT_TIMEOUT_SECONDS");
@@ -574,6 +584,7 @@ mod tests {
 
     #[test]
     fn test_config_from_env() {
+        let _guard = env_guard();
         std::env::set_var("SEMINSTRUCT_SHIMMY_URL", "http://shimmy:9000");
         std::env::set_var("SEMINSTRUCT_PORT", "9999");
         std::env::set_var("SEMINSTRUCT_TIMEOUT_SECONDS", "60");
@@ -586,7 +597,6 @@ mod tests {
         assert_eq!(config.timeout_seconds, 60);
         assert_eq!(config.max_retries, 5);
 
-        // Cleanup
         std::env::remove_var("SEMINSTRUCT_SHIMMY_URL");
         std::env::remove_var("SEMINSTRUCT_PORT");
         std::env::remove_var("SEMINSTRUCT_TIMEOUT_SECONDS");
@@ -595,6 +605,7 @@ mod tests {
 
     #[test]
     fn test_config_invalid_port_uses_default() {
+        let _guard = env_guard();
         std::env::set_var("SEMINSTRUCT_PORT", "not_a_number");
 
         let config = Config::from_env();
@@ -606,6 +617,7 @@ mod tests {
 
     #[test]
     fn test_config_invalid_timeout_uses_default() {
+        let _guard = env_guard();
         std::env::set_var("SEMINSTRUCT_TIMEOUT_SECONDS", "invalid");
 
         let config = Config::from_env();
