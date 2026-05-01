@@ -306,31 +306,57 @@ docker run -d \
 
 ## Deployment Patterns
 
+> **One seminstruct fronts one semserve.** The proxy reads a single
+> `SEMINSTRUCT_BACKEND_URL` and routes everything there — there is no
+> model-field-based dispatch inside seminstruct today. To run multiple
+> tiers, you deploy multiple `seminstruct + semserve` pairs and let the
+> caller (typically SemStreams's `model_registry`) pick which proxy URL
+> to hit per capability. This split of concerns is intentional: the
+> registry routes, seminstruct hardens (retry / circuit-break /
+> metrics), semserve serves.
+
 For the simplest case, run one `seminstruct` + one `semserve:latest` and
 point everything at it. That works fine until two workload classes start
 sharing the inference queue and the cheap one (e.g. intent classification)
 starves behind the expensive one (e.g. graph community summaries). The
-fix is to deploy more than one semserve instance and let the caller route
-by capability.
+fix is to deploy a second pair on a different port and route by capability.
 
 ### Three-endpoint reference deployment
 
 The shape we recommend for SemStreams workloads with the new model
-registry (capabilities → endpoints):
+registry (capabilities → endpoints). Each row is an independent
+`seminstruct + semserve` pair plus the standalone `semembed` service:
 
 ```text
-                                   ┌── semserve:qwen3-0.6b   :11435  ── hot
-seminstruct ──┬── (proxy retry) ──┤
-              │                    └── semserve:qwen3-1.7b   :11436  ── quality
-              │
-              └── semembed (separate)  :8081                          ── embedding
+                  ┌── seminstruct-hot     :8083 ── semserve:qwen3-0.6b   :11435
+                  │   (retry, metrics)            (--reasoning off, np=4 -cb)
+semstreams ──────┤
+(model_registry)  ├── seminstruct-quality :8084 ── semserve:qwen3-1.7b   :11435
+                  │   (retry, metrics)            (--reasoning auto, np=4 -cb)
+                  │
+                  └── semembed                :8081 (own service, fastembed-rs)
 ```
 
-| SemStreams endpoint | Image | `--alias` (model id) | Capabilities to route here |
-|---|---|---|---|
-| `semserve-hot` | `ghcr.io/c360studio/semserve:qwen3-0.6b` | `qwen3-0.6b` | `query_classification`, intent classification (hidden), `defaults.model` |
-| `semserve-quality` | `ghcr.io/c360studio/semserve:qwen3-1.7b` | `qwen3-1.7b` | `community_summary`, `answer_synthesis` fallback, anomaly review (piggyback) |
-| `semembed` | `ghcr.io/c360studio/semembed:latest` | n/a (embeddings) | `embedding` |
+semserve listens on 11435 inside its own container regardless of variant;
+the host-side port mapping is what differs between the hot and quality
+deployments. Each `seminstruct-*` proxy has its own
+`SEMINSTRUCT_BACKEND_URL` pointing at exactly one semserve.
+
+| Capability route | Proxy URL the registry hits | Backing semserve image | model id (`--alias`) | Capabilities to send here |
+|---|---|---|---|---|
+| Hot | `http://seminstruct-hot:8083` | `ghcr.io/c360studio/semserve:qwen3-0.6b` | `qwen3-0.6b` | `query_classification`, intent classification (hidden), `defaults.model` |
+| Quality | `http://seminstruct-quality:8084` | `ghcr.io/c360studio/semserve:qwen3-1.7b` | `qwen3-1.7b` | `community_summary`, `answer_synthesis` fallback, anomaly review (piggyback) |
+| Embedding | `http://semembed:8081` | `ghcr.io/c360studio/semembed:latest` | n/a (embeddings) | `embedding` |
+
+### When you'd want multi-backend routing inside seminstruct instead
+
+Adding model-field-based routing inside seminstruct (one URL, many
+backends, dispatch by `model` field) is possible but not currently
+implemented. It would duplicate the work the SemStreams `model_registry`
+already does on the caller side, so for SemStreams workloads the
+two-pairs deployment is the right shape. It's worth revisiting only if
+a non-SemStreams consumer needs a single OpenAI-compatible URL covering
+multiple models.
 
 ### Two operator notes that bite if missed
 
