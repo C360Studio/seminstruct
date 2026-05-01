@@ -7,11 +7,6 @@ on:
     branches: [ main, develop ]
   workflow_dispatch:
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: c360studio/seminstruct
-  RUST_VERSION: "1.95"
-
 jobs:
   build:
     name: Build and Test
@@ -25,102 +20,52 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build services (semserve from source + seminstruct)
+      - name: Build seminstruct (llama-server + GGUF) from source
         run: |
-          echo "Building semserve (llama-server + GGUF) from source and seminstruct..."
+          echo "Building seminstruct image with default Qwen3-0.6B Q4_K_M..."
           docker compose -f docker-compose.yml -f docker-compose.ci.yml build
 
-      - name: Start services
+      - name: Start service
         run: |
-          echo "Starting services with small model (Qwen3-0.6B Q4_K_M)..."
           docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
 
-      - name: Wait for semserve model load
+      - name: Wait for model load
         run: |
-          echo "Waiting for semserve (llama-server) to load model..."
+          echo "Waiting for llama-server to load the GGUF and start serving..."
           for i in {1..90}; do
-            if curl -sf http://localhost:11435/health 2>/dev/null; then
-              echo "Semserve is ready!"
+            if curl -sf http://localhost:8083/health 2>/dev/null; then
+              echo "seminstruct is healthy"
               exit 0
             fi
-            echo "Attempt $i/90: Model loading..."
+            echo "Attempt $i/90: model still loading..."
             sleep 5
           done
-          echo "Semserve failed to start"
-          docker compose logs semserve
-          exit 1
-
-      - name: Wait for seminstruct
-        run: |
-          echo "Waiting for seminstruct to start..."
-          for i in {1..30}; do
-            if curl -sf http://localhost:8083/health 2>/dev/null; then
-              echo "Seminstruct is ready!"
-              exit 0
-            fi
-            echo "Attempt $i/30: Service not ready yet..."
-            sleep 2
-          done
-          echo "Seminstruct failed to start"
+          echo "seminstruct failed to start"
           docker compose logs seminstruct
           exit 1
 
-      - name: Test health endpoint
+      - name: Verify model alias is published
         run: |
-          response=$(curl -s http://localhost:8083/health)
-          echo "Health response: $response"
-          echo "$response" | grep -q '"backend_healthy":true' || (echo "Expected backend_healthy:true" && exit 1)
-
-      - name: Test ready endpoint (waits for model load)
-        run: |
-          echo "Waiting for semserve model to load via /ready endpoint..."
-          for i in {1..60}; do
-            response=$(curl -s http://localhost:8083/ready)
-            echo "Attempt $i/60: $response"
-            if echo "$response" | grep -q '"ready":true'; then
-              echo "Seminstruct is ready for inference!"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Seminstruct /ready never returned ready:true after 5 minutes"
-          exit 1
-
-      - name: Test metrics endpoint
-        run: |
-          metrics=$(curl -s http://localhost:8083/metrics)
-          echo "Checking metrics..."
-          echo "$metrics" | grep -q 'seminstruct_requests_total' || exit 1
-          echo "$metrics" | grep -q 'seminstruct_request_duration_seconds' || exit 1
+          models=$(curl -s http://localhost:8083/v1/models)
+          echo "Models response: $models"
+          echo "$models" | jq -e '.data[] | select(.id == "qwen3-0.6b")' > /dev/null \
+            || (echo "Expected model id 'qwen3-0.6b' not found in /v1/models" && exit 1)
 
       - name: Test chat completions endpoint (integration)
         run: |
-          echo "Testing chat completions endpoint..."
-          # Get available models from semserve. llama-server is launched with
-          # --alias qwen3-0.6b so that id should always be present.
-          models=$(curl -s http://localhost:8083/v1/models)
-          echo "Available models: $models"
-          model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("qwen")) | .id' | head -1)
-          if [ -z "$model_id" ]; then
-            model_id=$(echo "$models" | jq -r '.data[-1].id // empty')
-          fi
-          echo "Selected model: $model_id"
-          response=$(curl -s http://localhost:8083/v1/chat/completions \
+          response=$(curl -s -X POST http://localhost:8083/v1/chat/completions \
             -H "Content-Type: application/json" \
-            -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20,\"stream\":false}")
+            -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"Say hello"}],"max_tokens":20,"stream":false}')
           echo "Response: $response"
-          echo "$response" | jq -e '.choices[0].message.content' || (echo "No content in response" && exit 1)
-          echo "Integration test passed!"
-
-      - name: View semserve logs
-        if: always()
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml logs semserve
+          echo "$response" | jq -e '.choices[0].message.content' > /dev/null \
+            || (echo "No content in response" && exit 1)
+          echo "Integration test passed."
 
       - name: View seminstruct logs
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml logs seminstruct
 
-      - name: Stop services
+      - name: Stop service
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down
 
@@ -156,63 +101,15 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
-          ignore: DL3008,DL3009  # Ignore apt-get version pinning warnings
+          ignore: DL3008,DL3009  # apt-get version pinning warnings
 
   push:
-    name: Push to GHCR
+    name: Push to GHCR (${{ matrix.variant.alias }})
     runs-on: ubuntu-latest
     needs: [build, security, lint]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=main-{{sha}},enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  push-semserve:
-    name: Push Semserve to GHCR (${{ matrix.variant.alias }})
-    runs-on: ubuntu-latest
-    needs: [build, security, lint]
-    # Run on every main push and on manual dispatch. Previously this gated
-    # on `head_commit.modified` containing Dockerfile.semserve, but that
-    # checks only the *latest* commit in a multi-commit push — a trailing
-    # CI-fix commit on top of a Dockerfile change would skip the matrix.
-    # BuildKit GHA cache keeps unchanged-input rebuilds fast (~1-2 min per
-    # variant from cache), so always-run is a cleaner contract than fragile
+    # Run on every main push and on manual dispatch. BuildKit GHA cache
+    # keeps unchanged-input rebuilds fast (~1-2 min per variant from
+    # cache), so always-run is a cleaner contract than fragile
     # change-detection on the head commit.
     if: |
       github.event_name == 'workflow_dispatch' ||
@@ -242,6 +139,14 @@ jobs:
             file: Qwen3-1.7B-Q4_K_M.gguf
             reasoning: auto
             extra_tags: ""
+          # Premium tier: 8B for deployments with the memory budget who want
+          # higher answer/summary quality. ~5GB image, ~6GB process memory at
+          # -np 4 -cb -c 2048. reasoning=auto.
+          - alias: qwen3-8b
+            repo: unsloth/Qwen3-8B-GGUF
+            file: Qwen3-8B-Q4_K_M.gguf
+            reasoning: auto
+            extra_tags: ""
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -260,7 +165,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/c360studio/semserve
+          images: ghcr.io/c360studio/seminstruct
           tags: |
             type=raw,value=${{ matrix.variant.alias }},enable={{is_default_branch}}
             type=raw,value=${{ matrix.variant.alias }}-{{sha}},enable={{is_default_branch}}
@@ -270,7 +175,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.semserve
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -278,14 +183,14 @@ jobs:
           build-args: |
             MODEL_REPO=${{ matrix.variant.repo }}
             MODEL_FILE=${{ matrix.variant.file }}
-            SEMSERVE_ALIAS=${{ matrix.variant.alias }}
-            SEMSERVE_REASONING=${{ matrix.variant.reasoning }}
+            MODEL_ALIAS=${{ matrix.variant.alias }}
+            MODEL_REASONING=${{ matrix.variant.reasoning }}
           # Share the llama.cpp builder stage cache across matrix entries
           # (scope=builder). Each variant has its own model+runtime cache
-          # (scope=variant-${alias}) since those layers differ.
+          # (scope=variant-<alias>) since those layers differ.
           cache-from: |
-            type=gha,scope=semserve-builder
-            type=gha,scope=semserve-${{ matrix.variant.alias }}
+            type=gha,scope=seminstruct-builder
+            type=gha,scope=seminstruct-${{ matrix.variant.alias }}
           cache-to: |
-            type=gha,scope=semserve-builder,mode=max
-            type=gha,scope=semserve-${{ matrix.variant.alias }},mode=max
+            type=gha,scope=seminstruct-builder,mode=max
+            type=gha,scope=seminstruct-${{ matrix.variant.alias }},mode=max

@@ -1,284 +1,166 @@
 version: '3'
 
-# SemInstruct - Containerized Development Workflow
-# Lightweight proxy in front of an OpenAI-compatible inference backend (semserve)
+# seminstruct - dev workflow for the llama-server image factory.
+# All tasks operate on the single seminstruct container (port 8083).
 
 vars:
-  IMAGE_NAME: semstreams-seminstruct
-  CONTAINER_NAME: seminstruct-dev
+  IMAGE_NAME: seminstruct
+  CONTAINER_NAME: seminstruct
   PORT: 8083
-  SEMSERVE_PORT: 11435
 
 tasks:
-  # Build tasks
+  # ------------------------------------------------------------------------
+  # Build
+  # ------------------------------------------------------------------------
   build:
-    desc: Build Docker image
+    desc: Build the seminstruct Docker image (default Qwen3-0.6B variant)
     cmds:
-      - echo "Building seminstruct Docker image..."
-      - docker build -t {{.IMAGE_NAME}}:latest .
-      - echo "Image built - {{.IMAGE_NAME}}:latest"
-
-  build:fast:
-    desc: Build Docker image with buildkit cache
-    cmds:
-      - echo "Building seminstruct with BuildKit cache..."
-      - DOCKER_BUILDKIT=1 docker build --cache-from {{.IMAGE_NAME}}:latest -t {{.IMAGE_NAME}}:latest .
-      - echo "Image built - {{.IMAGE_NAME}}:latest"
+      - echo "Building seminstruct from source..."
+      - docker compose -f docker-compose.yml -f docker-compose.ci.yml build
+      - echo "Built {{.IMAGE_NAME}}:ci"
 
   build:no-cache:
-    desc: Build Docker image without cache
+    desc: Build without cache
     cmds:
-      - echo "Building seminstruct without cache..."
-      - docker build --no-cache -t {{.IMAGE_NAME}}:latest .
-      - echo "Image built - {{.IMAGE_NAME}}:latest"
+      - docker compose -f docker-compose.yml -f docker-compose.ci.yml build --no-cache
 
-  # Docker Compose (recommended way to run)
+  # ------------------------------------------------------------------------
+  # Run
+  # ------------------------------------------------------------------------
   up:
-    desc: Start seminstruct + semserve with docker-compose
+    desc: Start seminstruct (pulls :latest from GHCR by default)
     cmds:
       - docker compose up -d
-      - echo "Services starting..."
-      - echo "Health - curl http://localhost:{{.PORT}}/health"
-      - echo "Logs - task logs"
+      - echo "Service starting..."
+      - 'echo "Health: curl http://localhost:{{.PORT}}/health"'
+      - 'echo "Logs:   task logs"'
 
   down:
-    desc: Stop all services
+    desc: Stop the service
     cmds:
       - docker compose down
-      - echo "Services stopped"
 
+  # ------------------------------------------------------------------------
   # Integration tests (run before push!)
+  # ------------------------------------------------------------------------
   integration:
-    desc: Run full integration tests locally (run before push!)
+    desc: Full local integration test (build + run + curl + cleanup)
     cmds:
-      - echo "Building services (semserve from source)..."
+      - echo "Building seminstruct from source..."
       - docker compose -f docker-compose.yml -f docker-compose.ci.yml build
       - docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
       - |
-        echo "Waiting for semserve..."
+        echo "Waiting for model load..."
         for i in $(seq 1 90); do
-          if curl -sf http://localhost:{{.SEMSERVE_PORT}}/health 2>/dev/null; then
-            echo "Semserve ready!"
+          if curl -sf http://localhost:{{.PORT}}/health 2>/dev/null; then
+            echo "seminstruct ready"
             break
           fi
           if [ $i -eq 90 ]; then
-            echo "Semserve timeout"
-            docker compose logs semserve
-            exit 1
-          fi
-          echo "Attempt $i/90..."
-          sleep 5
-        done
-      - |
-        echo "Waiting for seminstruct..."
-        for i in $(seq 1 30); do
-          if curl -sf http://localhost:{{.PORT}}/health 2>/dev/null; then
-            echo "Seminstruct ready!"
-            break
-          fi
-          if [ $i -eq 30 ]; then
-            echo "Seminstruct timeout"
+            echo "seminstruct timeout"
             docker compose logs seminstruct
             exit 1
           fi
-          sleep 2
+          echo "  $i/90..."
+          sleep 5
         done
-      - echo "=== Health Check ==="
-      - curl -s http://localhost:{{.PORT}}/health | jq .
-      - echo "=== Chat Completion ==="
+      - echo "=== /v1/models ==="
+      - curl -s http://localhost:{{.PORT}}/v1/models | jq '.data[] | {id, object}'
+      - echo "=== /v1/chat/completions ==="
       - |
-        models=$(curl -s http://localhost:{{.PORT}}/v1/models)
-        echo "Available models: $models"
-        model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("qwen") or contains("mistral")) | .id' | head -1)
-        [ -z "$model_id" ] && model_id=$(echo "$models" | jq -r '.data[-1].id // "test"')
-        echo "Using model: $model_id"
         curl -s http://localhost:{{.PORT}}/v1/chat/completions \
           -H "Content-Type: application/json" \
-          -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20,\"stream\":false}" | jq .
-      - echo "=== Integration tests passed! ==="
+          -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"Say hello"}],"max_tokens":20,"stream":false}' \
+          | jq '.choices[0].message'
+      - echo "=== Integration tests passed ==="
       - docker compose -f docker-compose.yml -f docker-compose.ci.yml down
 
   integration:quick:
-    desc: Run integration tests (services already running)
+    desc: Run integration assertions (service already running)
     cmds:
-      - echo "=== Health Check ==="
-      - curl -s http://localhost:{{.PORT}}/health | jq .
-      - echo "=== Chat Completion ==="
-      - |
-        models=$(curl -s http://localhost:{{.PORT}}/v1/models)
-        echo "Available models: $models"
-        model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("qwen") or contains("mistral")) | .id' | head -1)
-        [ -z "$model_id" ] && model_id=$(echo "$models" | jq -r '.data[-1].id // "test"')
-        echo "Using model: $model_id"
-        curl -s http://localhost:{{.PORT}}/v1/chat/completions \
-          -H "Content-Type: application/json" \
-          -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20,\"stream\":false}" | jq .
-
-  # Test tasks
-  test:health:
-    desc: Test health endpoint
-    cmds:
-      - echo "Testing health endpoint..."
-      - curl -f http://localhost:{{.PORT}}/health || (echo "Health check failed" && exit 1)
-      - echo "Health check passed"
-
-  test:semserve:
-    desc: Test semserve backend directly
-    cmds:
-      - echo "Testing semserve backend..."
-      - curl -f http://localhost:{{.SEMSERVE_PORT}}/health || (echo "Semserve health check failed" && exit 1)
-      - echo "Semserve health check passed"
-
-  test:chat:
-    desc: Test chat completions endpoint (OpenAI-compatible)
-    cmds:
-      - echo "Testing chat completions..."
-      - |
-        model_id=$(curl -s http://localhost:{{.PORT}}/v1/models | jq -r '.data[0].id // "test"')
-        curl -s http://localhost:{{.PORT}}/v1/chat/completions \
-          -H "Content-Type: application/json" \
-          -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":50,\"stream\":false}" || (echo "Chat completions test failed" && exit 1)
+      - curl -s http://localhost:{{.PORT}}/health
       - echo ""
-      - echo "Chat completions test passed"
+      - curl -s http://localhost:{{.PORT}}/v1/models | jq '.data[] | {id, object}'
+      - |
+        curl -s http://localhost:{{.PORT}}/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"Say hello"}],"max_tokens":20,"stream":false}' \
+          | jq '.choices[0].message'
+
+  # ------------------------------------------------------------------------
+  # Endpoint smoke tests
+  # ------------------------------------------------------------------------
+  test:health:
+    desc: Hit /health
+    cmds:
+      - curl -fsS http://localhost:{{.PORT}}/health && echo
 
   test:models:
-    desc: Test models endpoint
+    desc: Hit /v1/models
     cmds:
-      - echo "Testing models endpoint..."
-      - curl -s http://localhost:{{.PORT}}/v1/models | python3 -m json.tool
-      - echo "Models endpoint test passed"
+      - curl -fsS http://localhost:{{.PORT}}/v1/models | jq
 
-  test:all:
-    desc: Run all tests
-    deps: [test:health, test:chat]
+  test:chat:
+    desc: Hit /v1/chat/completions with a short prompt
     cmds:
-      - echo "All tests passed"
+      - |
+        model_id=$(curl -s http://localhost:{{.PORT}}/v1/models | jq -r '.data[0].id // "qwen3-0.6b"')
+        curl -fsS http://localhost:{{.PORT}}/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":50,\"stream\":false}" \
+          | jq
 
-  # Logging
+  # ------------------------------------------------------------------------
+  # Logs
+  # ------------------------------------------------------------------------
   logs:
-    desc: View all service logs
-    cmds:
-      - docker compose logs -f
-
-  logs:seminstruct:
-    desc: View seminstruct logs only
+    desc: Tail seminstruct logs
     cmds:
       - docker compose logs -f seminstruct
 
-  logs:semserve:
-    desc: View semserve logs only
-    cmds:
-      - docker compose logs -f semserve
-
-  # Metrics and monitoring
-  metrics:
-    desc: View Prometheus metrics
-    cmds:
-      - curl -s http://localhost:{{.PORT}}/metrics
-
-  models:
-    desc: List loaded models
-    cmds:
-      - curl -s http://localhost:{{.PORT}}/v1/models | python3 -m json.tool
-
-  # Clean tasks
+  # ------------------------------------------------------------------------
+  # Cleanup
+  # ------------------------------------------------------------------------
   clean:
     desc: Stop and remove containers
     cmds:
       - docker compose down
-      - echo "Containers removed"
 
   clean:image:
-    desc: Remove Docker image
+    desc: Remove built CI image
     deps: [clean]
     cmds:
-      - docker rmi {{.IMAGE_NAME}}:latest 2>/dev/null || true
-      - echo "Image removed"
+      - docker rmi {{.IMAGE_NAME}}:ci 2>/dev/null || true
 
-  clean:cache:
-    desc: Remove semserve model cache volume
-    deps: [clean]
-    cmds:
-      - docker volume rm seminstruct_semserve-cache 2>/dev/null || true
-      - echo "Model cache removed"
-
-  clean:all:
-    desc: Clean everything (containers, images, cache)
-    deps: [clean, clean:image, clean:cache]
-    cmds:
-      - echo "Complete cleanup finished"
-
-  # Development workflow shortcuts
-  dev:
-    desc: Full development cycle (build + up + wait + test)
-    cmds:
-      - task build
-      - task up
-      - echo "Waiting for semserve to load model (this may take a few minutes)..."
-      - |
-        for i in $(seq 1 60); do
-          if curl -sf http://localhost:{{.SEMSERVE_PORT}}/health > /dev/null 2>&1; then
-            echo "Semserve is ready"
-            break
-          fi
-          echo "  Waiting... ($i/60)"
-          sleep 10
-        done
-      - task test:all
-      - echo "Development cycle complete"
-
-  dev:rebuild:
-    desc: Rebuild and restart services
-    cmds:
-      - task clean
-      - task build:no-cache
-      - task up
-      - echo "Services rebuilt and running"
-
+  # ------------------------------------------------------------------------
   # Help
+  # ------------------------------------------------------------------------
   default:
-    desc: Show available tasks
+    desc: List tasks
     silent: true
     cmds:
       - task --list
 
   help:
-    desc: Show detailed usage guide
+    desc: Usage guide
     silent: true
     cmds:
       - |
-        echo "SemInstruct - OpenAI-Compatible Inference Proxy"
+        echo "seminstruct - llama-server image factory for SemStreams instruct tier"
         echo ""
-        echo "Quick Start:"
-        echo "  task up               # Start seminstruct + semserve"
-        echo "  task logs             # View service logs"
+        echo "Quick start:"
+        echo "  task up               # Pull :latest and start"
+        echo "  task logs             # Tail logs"
         echo "  task test:chat        # Test chat completions"
+        echo "  task down             # Stop"
         echo ""
-        echo "Build and Run:"
-        echo "  task build            # Build seminstruct image"
-        echo "  task up               # Start all services"
-        echo "  task down             # Stop all services"
+        echo "Local build:"
+        echo "  task build            # Build from Dockerfile (default Qwen3-0.6B)"
+        echo "  task integration      # Full build + run + test + cleanup"
         echo ""
-        echo "Testing:"
-        echo "  task test:health      # Health check (includes backend status)"
-        echo "  task test:semserve    # Test semserve directly"
-        echo "  task test:chat        # Chat completions test"
-        echo "  task test:models      # Models endpoint test"
-        echo "  task test:all         # All tests"
+        echo "Smoke tests:"
+        echo "  task test:health      # GET /health"
+        echo "  task test:models      # GET /v1/models"
+        echo "  task test:chat        # POST /v1/chat/completions"
         echo ""
-        echo "Integration (run before push):"
-        echo "  task integration      # Full build + test + cleanup"
-        echo "  task integration:quick # Test only (services running)"
-        echo ""
-        echo "Logging:"
-        echo "  task logs             # All service logs"
-        echo "  task logs:seminstruct # Proxy logs only"
-        echo "  task logs:semserve    # Backend logs only"
-        echo ""
-        echo "Development:"
-        echo "  task dev              # Full dev cycle"
-        echo "  task dev:rebuild      # Full rebuild"
-        echo ""
-        echo "Cleanup:"
-        echo "  task clean            # Remove containers"
-        echo "  task clean:all        # Remove everything"
+        echo "See README.md for image variants, deployment patterns, and resource budgets."

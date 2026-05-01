@@ -1,57 +1,30 @@
-# SemInstruct - Local Development
-# Lightweight proxy in front of an OpenAI-compatible inference backend (semserve).
-# semserve runs llama-server (llama.cpp) with a GGUF model baked in.
+# SemInstruct - local development
+#
+# Pulls the pre-built image from GHCR and runs llama-server with a baked-in
+# GGUF on port 8083. The OpenAI-compatible API is at /v1/chat/completions.
+#
+# Default image is :latest (Qwen3-0.6B, hot tier). For other tiers swap to
+# :qwen3-1.7b or :qwen3-8b. See README's "Image Variants" section.
 
 services:
-  # Lightweight proxy service (~256MB memory)
   seminstruct:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: semstreams-seminstruct:dev
-    container_name: seminstruct-dev
+    image: ghcr.io/c360studio/seminstruct:latest
+    container_name: seminstruct
     ports:
       - "8083:8083"
     environment:
-      - SEMINSTRUCT_BACKEND_URL=http://semserve:11435
-      - SEMINSTRUCT_PORT=8083
-      - SEMINSTRUCT_TIMEOUT_SECONDS=120
-      - SEMINSTRUCT_MAX_RETRIES=3
-      - RUST_LOG=info
-    depends_on:
-      semserve:
-        condition: service_healthy
+      # Override at runtime without rebuilding the image.
+      # MODEL_ALIAS: stable model id surfaced in /v1/models.
+      # MODEL_REASONING: Qwen3 thinking — on | off | auto. Defaults to off
+      #   in :latest (hot tier); :qwen3-1.7b bakes auto.
+      - MODEL_ALIAS=qwen3-0.6b
+      - MODEL_REASONING=off
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
       interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '1.0'
-        reservations:
-          memory: 64M
-          cpus: '0.25'
-
-  # Inference backend: llama-server (llama.cpp) with Qwen3-0.6B Q4_K_M baked in.
-  # :latest is the hot tier (small + fast, --reasoning off). For the quality
-  # tier (Qwen3-1.7B with thinking), use :qwen3-1.7b. See README's Deployment
-  # Patterns section for two-tier setups.
-  semserve:
-    image: ghcr.io/c360studio/semserve:latest
-    container_name: semserve-dev
-    ports:
-      - "11435:11435"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11435/health"]
-      interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s  # Model already loaded in image
+      start_period: 30s
     restart: unless-stopped
     deploy:
       resources:

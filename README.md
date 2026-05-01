@@ -1,107 +1,24 @@
-# SemInstruct - OpenAI-Compatible Inference Proxy
+# seminstruct
 
-**Status**: Alpha
-**Package**: `seminstruct`
-**Port**: `8083`
+**OpenAI-compatible instruct-tier inference for SemStreams.**
 
-## Overview
+`seminstruct` is the image factory for the SemStreams *instruct tier* —
+chat completions, classification, summarization. Each published image is
+[llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` with
+a curated GGUF baked in, configured for concurrent inference (`-np 4 -cb`)
+and an OpenAI-compatible HTTP API on port `8083`.
 
-SemInstruct is a lightweight proxy service that provides an OpenAI-compatible API
-by forwarding requests to **semserve**, a small inference backend built on
-[llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` with a GGUF
-model baked in.
+The parallel project for the embedding tier is
+[semembed](https://github.com/c360studio/semembed). Together they cover
+the LLM workloads that semstreams's `model_registry` dispatches to.
 
-**Key Features**:
-
-- OpenAI API compatible (`/v1/chat/completions`)
-- Lightweight Rust proxy (~50MB container, ~256MB memory)
-- Concurrent inference: semserve runs `-np 4 -cb` (four parallel slots,
-  continuous batching) — fixes request stacking under graph-busy bursts
-- Fast startup (no model loading in the proxy)
-- Retry logic with exponential backoff
-- Health and readiness checks for the backend
-- Prometheus metrics
-
-## Why a Proxy?
-
-SemInstruct exists to decouple your SemStreams application from the inference
-backend:
-
-1. **Backend Flexibility** - Swap semserve for OpenAI, Ollama, or any
-   OpenAI-compatible service without code changes
-2. **Reliability** - Built-in retry logic with exponential backoff handles
-   transient failures
-3. **Observability** - Prometheus metrics for request rates, latencies, and
-   error tracking
-4. **Health Monitoring** - Aggregated health checks report backend availability
-5. **Fast Startup** - No model loading means instant restarts and scaling
-
-## Why Not MCP?
-
-You might wonder why SemInstruct uses a traditional HTTP proxy instead of
-[Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
-
-**Use Case**: SemInstruct serves
-[SemStreams](https://github.com/c360studio/semstreams), a streaming data
-processing system. SemStreams graph nodes make inference requests during stream
-processing - they already have all the context they need from the data flowing
-through the graph.
-
-**Why HTTP fits better**:
-
-1. **Stateless by Design** - Each inference request is self-contained.
-   SemStreams nodes pass complete context (document text, classification labels,
-   etc.) in each request. No conversation history or tool discovery needed.
-
-2. **No Tool Orchestration** - MCP excels when an LLM needs to discover and
-   invoke tools dynamically. SemStreams nodes know exactly what they need -
-   extract entities, classify text, summarize content - and include all inputs
-   in the request.
-
-3. **Streaming Architecture** - Requests arrive from NATS streams at high
-   throughput. HTTP's request/response model maps cleanly to stream processing
-   semantics.
-
-4. **Backend Flexibility** - The OpenAI-compatible API lets you swap backends
-   (semserve → Ollama → OpenAI → vLLM) without code changes. MCP would tie you
-   to a specific protocol.
-
-**When MCP makes sense**: Interactive assistants, agentic workflows with tool
-use, or applications where the LLM needs to discover capabilities at runtime.
-
-**When HTTP makes sense**: Batch processing, stream processing, or any workload
-where the caller knows exactly what inference it needs and provides complete
-context per request.
-
-## Architecture
-
-```text
-┌─────────────────────────────────────┐
-│           seminstruct               │
-│  ┌─────────────────────────────┐    │
-│  │ Axum HTTP Proxy             │    │  ~256MB memory
-│  │ Retry logic, metrics        │    │  Fast startup
-│  └─────────────────────────────┘    │
-└──────────────┬──────────────────────┘
-               │ HTTP proxy
-               ▼
-┌─────────────────────────────────────┐
-│            semserve                 │
-│  llama-server (llama.cpp)           │  ~1.5GB memory (0.6B Q4, np=4)
-│  -np 4 -cb (concurrent inference)   │
-└─────────────────────────────────────┘
-```
+**Status**: Alpha &nbsp;&nbsp; **Port**: `8083` &nbsp;&nbsp; **API**: OpenAI-compatible `/v1/chat/completions`
 
 ## Quick Start
 
 ```bash
-# Start services (pulls pre-built images from GHCR)
 docker compose up -d
-
-# Wait for services to be ready (~30s)
-docker compose logs -f semserve
-
-# Test with curl
+# wait ~30s for the model to load
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -110,15 +27,64 @@ curl http://localhost:8083/v1/chat/completions \
   }'
 ```
 
-No build required - images are pulled from `ghcr.io/c360studio/semserve`.
+The default `compose` pulls `ghcr.io/c360studio/seminstruct:latest` (the
+hot tier — Qwen3-0.6B Q4_K_M, `--reasoning off`). To run a different
+tier, edit `docker-compose.yml` to point at `:qwen3-1.7b` or `:qwen3-8b`.
+
+## Why this shape
+
+SemStreams nodes call LLMs from inside stream processing — they have all
+the context they need from the data flowing through the graph. They
+don't need MCP-style tool discovery or conversation state. They need a
+fast, OpenAI-compatible HTTP endpoint with concurrent inference so that
+background batch work (community summaries) doesn't starve user-facing
+classification work behind it.
+
+`seminstruct` doesn't add a proxy layer — it ships llama-server directly
+in a small image with a baked GGUF and the right flags. Routing,
+retries, timeouts, and rate limiting live in semstreams's
+`model_registry` on the caller side; that's the right place for them.
+
+## Image Variants
+
+CI publishes three variants to `ghcr.io/c360studio/seminstruct`, tagged
+by **the model inside**:
+
+| Tag | Model | Image | Memory (np=4, ctx=2048) | reasoning | Best for |
+|---|---|---|---|---|---|
+| `:qwen3-0.6b` (also `:latest`) | Qwen3-0.6B Q4_K_M | ~600MB | ~1.0GB | `off` | Hot path: intent + classify, `defaults.model`, every-message latency |
+| `:qwen3-1.7b` | Qwen3-1.7B Q4_K_M | ~1.4GB | ~2.0GB | `auto` | Quality tier: community summaries, answer synthesis, anomaly review |
+| `:qwen3-8b` | Qwen3-8B Q4_K_M | ~5.3GB | ~6.0GB | `auto` | Premium: deployments with the memory budget for higher answer quality |
+
+Tagging by model name (not deployment role) is intentional — the tag
+tells you what's *inside*; "hot" or "quality" or "premium" is deployment
+intent that lives in your compose / registry config. `:latest` aliases
+the 0.6B variant because that's the most common single-endpoint
+deployment.
+
+**Qwen3 thinking**: Qwen3 is a hybrid model that emits chain-of-thought
+inside `<think>...</think>` tags (separated into `message.reasoning_content`
+on the response). The hot image bakes `--reasoning off` because intent
+classification doesn't benefit from 100+ tokens of thinking prefix; the
+quality + premium images bake `--reasoning auto` so they think on harder
+summary work. Override per-deployment with `-e MODEL_REASONING=on|off|auto`.
+
+For other models (Mistral, Llama, etc.) build locally with build args:
+
+```bash
+docker build -t seminstruct:mistral \
+  --build-arg MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
+  --build-arg MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
+  --build-arg MODEL_ALIAS=mistral-7b \
+  --build-arg MODEL_REASONING=off .
+```
 
 ## API Reference
 
+This is `llama-server`'s native OpenAI-compatible API. Key endpoints
+SemStreams cares about:
+
 ### POST /v1/chat/completions
-
-OpenAI-compatible chat completions endpoint (proxied to semserve).
-
-**Request**:
 
 ```json
 {
@@ -132,265 +98,110 @@ OpenAI-compatible chat completions endpoint (proxied to semserve).
 }
 ```
 
-**Response**:
-
-```json
-{
-  "id": "chatcmpl-abc123def456ghi789",
-  "object": "chat.completion",
-  "created": 1699000000,
-  "model": "qwen3-0.6b",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "Here is a summary..."
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 50,
-    "completion_tokens": 100,
-    "total_tokens": 150
-  }
-}
-```
-
 ### GET /v1/models
 
-List available models (proxied from semserve).
-
-```bash
-curl http://localhost:8083/v1/models
-```
+Returns the baked-in model under its alias (e.g. `qwen3-0.6b`).
 
 ### GET /health
 
-Health check endpoint. Returns the inference backend's status.
+llama-server's native health endpoint. Returns 200 once the model is
+loaded and the server is ready to serve requests.
 
-```bash
-curl http://localhost:8083/health
-```
-
-**Response**:
-
-```json
-{
-  "status": "healthy",
-  "backend_url": "http://semserve:11435",
-  "backend_healthy": true
-}
-```
-
-### GET /ready
-
-Readiness probe. Returns 200 only when the backend can complete inference
-(verifies the model is actually loaded, not just that the process is up). Use
-for Kubernetes readiness probes.
-
-### GET /metrics
-
-Prometheus metrics including:
-
-- `seminstruct_requests_total` - Total requests
-- `seminstruct_request_duration_seconds` - Request latency
-- `seminstruct_errors_total` - Total errors
-- `seminstruct_backend_errors_total` - Inference backend errors
-
-## Client Examples
-
-### Python (OpenAI SDK)
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://localhost:8083/v1",
-    api_key="not-needed"
-)
-
-response = client.chat.completions.create(
-    model="qwen3-0.6b",
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Hello!"}
-    ],
-    max_tokens=100
-)
-
-print(response.choices[0].message.content)
-```
-
-### curl
-
-```bash
-curl http://localhost:8083/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3-0.6b",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
+For Kubernetes readiness probes, use `/health` directly on port 8083 —
+once it returns 200, llama-server has loaded the GGUF and is accepting
+requests.
 
 ## Configuration
 
+Runtime overrides (all read from process env; the image bakes defaults
+matching the variant's tier):
+
+| Variable | Default in `:latest` | Description |
+|---|---|---|
+| `MODEL_ALIAS` | `qwen3-0.6b` | Model id surfaced in `/v1/models`. Operators can rename without rebuilding. |
+| `MODEL_REASONING` | `off` | Qwen3 thinking: `on` \| `off` \| `auto`. |
+
+Build-time arguments (set via `--build-arg`):
+
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `SEMINSTRUCT_BACKEND_URL` | `http://localhost:11435` | Inference backend URL |
-| `SEMINSTRUCT_PORT` | `8083` | HTTP port |
-| `SEMINSTRUCT_TIMEOUT_SECONDS` | `120` | Request timeout |
-| `SEMINSTRUCT_MAX_RETRIES` | `3` | Max retry attempts |
-| `RUST_LOG` | `info` | Log level |
-
-## Image Variants
-
-CI publishes two pre-baked semserve images, tagged by **the model inside**:
-
-| Tag | Model | Image size | Memory (np=4, ctx=2048) | Best for |
-|---|---|---|---|---|
-| `:qwen3-0.6b` (also `:latest`) | Qwen3-0.6B Q4_K_M | ~600MB | ~1.2GB | Hot path: intent + classify, `defaults.model`, every-message latency |
-| `:qwen3-1.7b` | Qwen3-1.7B Q4_K_M | ~1.4GB | ~2GB | Quality tier: community summaries, answer synthesis, anomaly review |
-
-Tagging by model name (not deployment role) is intentional — `:qwen3-0.6b`
-tells you what's *inside* the image; "hot" or "quality" is deployment intent
-that lives in your compose / registry config, not the image tag. `:latest`
-points at the 0.6B variant because that's the most common single-endpoint
-deployment.
-
-**Qwen3 thinking**: Qwen3 is a hybrid model that emits chain-of-thought
-inside `<think>...</think>` tags (separated into `message.reasoning_content`
-on the response). The hot image bakes `--reasoning off` because intent
-classification doesn't benefit from 100+ tokens of thinking prefix; the
-quality image bakes `--reasoning auto` so it can think on harder summary
-work. Override per-deployment with `-e SEMSERVE_REASONING=on|off|auto`.
-
-For other models (Mistral, etc.) build locally with `Dockerfile.semserve`:
-
-```bash
-MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
-MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
-SEMSERVE_ALIAS=mistral-7b \
-docker build -f Dockerfile.semserve -t semserve:mistral \
-  --build-arg MODEL_REPO --build-arg MODEL_FILE --build-arg SEMSERVE_ALIAS .
-```
-
-## Docker Deployment
-
-### Docker Compose (Recommended)
-
-```bash
-docker compose up -d
-```
-
-This pulls pre-built images from GHCR and starts both services.
-
-### Manual
-
-```bash
-# Start semserve first (pre-built with Qwen3-0.6B)
-docker run -d \
-  --name semserve \
-  -p 11435:11435 \
-  ghcr.io/c360studio/semserve:latest
-
-# Then start seminstruct
-docker run -d \
-  --name seminstruct \
-  -p 8083:8083 \
-  -e SEMINSTRUCT_BACKEND_URL=http://semserve:11435 \
-  --link semserve \
-  ghcr.io/c360studio/seminstruct:latest
-```
+|---|---|---|
+| `MODEL_REPO` | `unsloth/Qwen3-0.6B-GGUF` | Hugging Face repo containing the GGUF |
+| `MODEL_FILE` | `Qwen3-0.6B-Q4_K_M.gguf` | GGUF filename within the repo |
+| `MODEL_ALIAS` | `qwen3-0.6b` | Bakes the default `--alias` |
+| `MODEL_REASONING` | `off` | Bakes the default `--reasoning` |
+| `LLAMA_CPP_TAG` | `b8994` | llama.cpp build tag (immutable) |
 
 ## Deployment Patterns
 
-> **One seminstruct fronts one semserve.** The proxy reads a single
-> `SEMINSTRUCT_BACKEND_URL` and routes everything there — there is no
-> model-field-based dispatch inside seminstruct today. To run multiple
-> tiers, you deploy multiple `seminstruct + semserve` pairs and let the
-> caller (typically SemStreams's `model_registry`) pick which proxy URL
-> to hit per capability. This split of concerns is intentional: the
-> registry routes, seminstruct hardens (retry / circuit-break /
-> metrics), semserve serves.
+> **One seminstruct = one model.** Each container runs llama-server with
+> exactly one GGUF. To run multiple tiers, deploy multiple seminstruct
+> containers (one per tier) on different ports and let the caller —
+> typically SemStreams's `model_registry` — pick which URL to hit per
+> capability. The registry routes; seminstruct serves.
 
-For the simplest case, run one `seminstruct` + one `semserve:latest` and
-point everything at it. That works fine until two workload classes start
-sharing the inference queue and the cheap one (e.g. intent classification)
-starves behind the expensive one (e.g. graph community summaries). The
-fix is to deploy a second pair on a different port and route by capability.
+For the simplest case, run one `seminstruct:latest` and point everything
+at it. That works fine until two workload classes start sharing the
+inference queue and the cheap one (e.g. intent classification) starves
+behind the expensive one (e.g. graph community summaries). The fix is to
+deploy a second container on a different port and route by capability.
 
-### Three-endpoint reference deployment
+### Three-tier reference deployment
 
 The shape we recommend for SemStreams workloads with the new model
-registry (capabilities → endpoints). Each row is an independent
-`seminstruct + semserve` pair plus the standalone `semembed` service:
+registry (capabilities → endpoints):
 
 ```text
-                  ┌── seminstruct-hot     :8083 ── semserve:qwen3-0.6b   :11435
-                  │   (retry, metrics)            (--reasoning off, np=4 -cb)
+                  ┌── seminstruct-hot      :8083 ── :qwen3-0.6b   reasoning=off
 semstreams ──────┤
-(model_registry)  ├── seminstruct-quality :8084 ── semserve:qwen3-1.7b   :11435
-                  │   (retry, metrics)            (--reasoning auto, np=4 -cb)
+(model_registry)  ├── seminstruct-quality  :8084 ── :qwen3-1.7b   reasoning=auto
                   │
-                  └── semembed                :8081 (own service, fastembed-rs)
+                  ├── seminstruct-premium  :8085 ── :qwen3-8b     reasoning=auto
+                  │   (optional, when memory budget allows)
+                  │
+                  └── semembed             :8081  (embedding tier, separate project)
 ```
 
-semserve listens on 11435 inside its own container regardless of variant;
-the host-side port mapping is what differs between the hot and quality
-deployments. Each `seminstruct-*` proxy has its own
-`SEMINSTRUCT_BACKEND_URL` pointing at exactly one semserve.
+Each `seminstruct-*` deployment is an independent container running its
+own llama-server. The host-side port mapping is what differs between
+them; inside the container they all bind 8083.
 
-| Capability route | Proxy URL the registry hits | Backing semserve image | model id (`--alias`) | Capabilities to send here |
-|---|---|---|---|---|
-| Hot | `http://seminstruct-hot:8083` | `ghcr.io/c360studio/semserve:qwen3-0.6b` | `qwen3-0.6b` | `query_classification`, intent classification (hidden), `defaults.model` |
-| Quality | `http://seminstruct-quality:8084` | `ghcr.io/c360studio/semserve:qwen3-1.7b` | `qwen3-1.7b` | `community_summary`, `answer_synthesis` fallback, anomaly review (piggyback) |
-| Embedding | `http://semembed:8081` | `ghcr.io/c360studio/semembed:latest` | n/a (embeddings) | `embedding` |
-
-### When you'd want multi-backend routing inside seminstruct instead
-
-Adding model-field-based routing inside seminstruct (one URL, many
-backends, dispatch by `model` field) is possible but not currently
-implemented. It would duplicate the work the SemStreams `model_registry`
-already does on the caller side, so for SemStreams workloads the
-two-pairs deployment is the right shape. It's worth revisiting only if
-a non-SemStreams consumer needs a single OpenAI-compatible URL covering
-multiple models.
+| Capability route | Image tag | Model id (`--alias`) | Capabilities to route here |
+|---|---|---|---|
+| Hot | `:qwen3-0.6b` (= `:latest`) | `qwen3-0.6b` | `query_classification`, intent classification (hidden), `defaults.model` |
+| Quality | `:qwen3-1.7b` | `qwen3-1.7b` | `community_summary`, `answer_synthesis` fallback, anomaly review (piggyback) |
+| Premium (optional) | `:qwen3-8b` | `qwen3-8b` | High-stakes `answer_synthesis`, hard summaries when latency budget allows |
+| Embedding | `semembed:latest` | n/a | `embedding` |
 
 ### Two operator notes that bite if missed
 
-1. **Point `defaults.model` at the hot endpoint, not quality.** Several
-   SemStreams call sites (intent classification on every user message,
-   onboarding layer normalization) currently fall through to
-   `defaults.model` — they have no capability constant yet. Putting
-   `defaults.model` on the quality endpoint means every user message
-   queues behind background summary work, which is the failure mode this
-   project's concurrency story exists to prevent.
+1. **Point `defaults.model` at the hot deployment, not quality or
+   premium.** Several SemStreams call sites (intent classification on
+   every user message, onboarding layer normalization) currently fall
+   through to `defaults.model` — they have no capability constant yet.
+   Putting `defaults.model` on a heavier endpoint means every user
+   message queues behind background summary work, which is the failure
+   mode this concurrency story exists to prevent.
 
 2. **Anomaly relationship review piggybacks on `community_summary`.**
    It's not its own capability — it shares the LLMClient injected into
    graph-clustering. Whatever endpoint owns `community_summary` will
    also carry anomaly review load; size accordingly and don't be
-   surprised when `seminstruct_requests_total` for the quality endpoint
-   is higher than `community_summary` alone would predict.
+   surprised when its request rate is higher than `community_summary`
+   alone would predict.
 
 ## Resource Use
 
-### Per-process budget
+### Per-container budget
 
-For a single `semserve` process running with `-np 4 -cb -c 2048`:
+For a single seminstruct container running with `-np 4 -cb -c 2048`:
 
-| Component | Qwen3-0.6B Q4_K_M | Qwen3-1.7B Q4_K_M |
-|---|---|---|
-| Model weights | ~430MB | ~1.1GB |
-| KV cache (4 slots × 2048 ctx) | ~110MB | ~250MB |
-| Compute / activations / overhead | ~400MB | ~600MB |
-| **Process total** | **~1.0GB** | **~2.0GB** |
-| Container image on disk | ~600MB | ~1.4GB |
-
-`seminstruct` (the proxy) is independent: ~256MB process memory, ~50MB
-image, regardless of which backend it talks to.
+| Component | :qwen3-0.6b | :qwen3-1.7b | :qwen3-8b |
+|---|---|---|---|
+| Model weights (Q4_K_M) | ~430MB | ~1.1GB | ~4.7GB |
+| KV cache (4 slots × 2048 ctx) | ~110MB | ~250MB | ~700MB |
+| Compute / activations / overhead | ~400MB | ~600MB | ~600MB |
+| **Process total** | **~1.0GB** | **~2.0GB** | **~6.0GB** |
+| Container image on disk | ~600MB | ~1.4GB | ~5.3GB |
 
 ### CPU under concurrency
 
@@ -400,63 +211,82 @@ requests into a single forward pass per step — throughput goes up,
 per-token latency stays roughly constant for the best slot, and the
 worst-case slot only pays a small batching overhead. So:
 
-- 4 cores is a reasonable floor for the hot tier; 8 cores comfortable.
-- 8 cores is a reasonable floor for the quality tier on CPU.
-- More slots than that costs little memory but produces diminishing
-  returns once compute saturates — the bottleneck moves from queue
-  depth to raw forward-pass throughput.
+- 4 cores is a reasonable floor for `:qwen3-0.6b`; 8 cores comfortable.
+- 8 cores is a reasonable floor for `:qwen3-1.7b` on CPU.
+- 8B-class models really want a GPU; on CPU expect single-digit tok/s
+  per slot with 8-16 cores.
 
 If you raise `-np`, also raise `-c` only if you need longer per-request
 context — KV cache scales linearly with `slots × ctx`.
 
-### Three-endpoint reference total
+### Three-tier reference total
 
-Co-locating the reference deployment on a single host:
+Co-locating the full reference deployment on a single host:
 
 | Component | Memory | Image |
 |---|---|---|
-| seminstruct (×1) | ~256MB | ~50MB |
-| semserve hot (qwen3-0.6b) | ~1.0GB | ~600MB |
-| semserve quality (qwen3-1.7b) | ~2.0GB | ~1.4GB |
+| seminstruct hot (qwen3-0.6b) | ~1.0GB | ~600MB |
+| seminstruct quality (qwen3-1.7b) | ~2.0GB | ~1.4GB |
+| seminstruct premium (qwen3-8b, optional) | ~6.0GB | ~5.3GB |
 | semembed | ~512MB | ~1GB |
-| **Total** | **~3.8GB** | **~3GB on disk** |
+| **Total without premium** | **~3.5GB** | **~3GB on disk** |
+| **Total with premium** | **~9.5GB** | **~8.3GB on disk** |
 
-Comfortable on a 4-core / 8GB host; comfortable headroom on 8-core / 16GB.
+Without premium: comfortable on 4-core / 8GB. With premium: 16GB host
+minimum, GPU strongly recommended for premium tier.
 
-## Migration from `semshimmy`
+## Migration Notes
 
-This project's backend was previously called `semshimmy` and wrapped
-[shimmy](https://github.com/michael-a-kuykendall/shimmy). It's been replaced
-with `semserve` running `llama-server` directly. Consumer impact:
+### From the previous `seminstruct` HTTP proxy
 
-- **HTTP API consumers** (anything calling `seminstruct:8083`): no changes —
-  OpenAI-compatible contract is unchanged.
-- **Compose / deployment**: replace any `ghcr.io/c360studio/semshimmy:latest`
-  reference with `ghcr.io/c360studio/semserve:latest`. If you reference the
-  service by name in your own compose file, rename `shimmy` → `semserve`.
-- **Env var**: the proxy's backend URL env var was renamed
-  `SEMINSTRUCT_SHIMMY_URL` → `SEMINSTRUCT_BACKEND_URL`. The internal config is
-  not consumer-facing in the typical deployment but flagged here for completeness.
+Earlier versions of this repo shipped a Rust HTTP proxy at port 8083 in
+front of a separate `semshimmy` / `semserve` backend. The proxy has been
+removed; `seminstruct` is now the image factory for `llama-server`
+directly, and the published `:latest` tag is the llama-server image, not
+the Rust proxy.
+
+For consumers:
+
+- **HTTP API**: same OpenAI-compatible contract on the same port (8083).
+  No client changes.
+- **Compose / deployment**: the old two-service shape (proxy + backend)
+  collapses to a single seminstruct service. Pull `:latest` and you get
+  llama-server-in-a-container; restart any running containers off the
+  old `:latest` to pick up the new image.
+- **Caller-side reliability**: retry, timeouts, rate limiting now live
+  in semstreams's `model_registry` on the caller side. The proxy used
+  to handle these; that responsibility moved up the stack.
+- **Old `:latest` digests**: still pullable by digest if you pin
+  explicitly, but the moving `:latest` tag now points at the new image.
+
+### From `ghcr.io/c360studio/semserve:*`
+
+The `semserve` image namespace was a transient name during this sprint
+(while seminstruct was still a proxy). It's been collapsed into
+`seminstruct`:
+
+| Was | Becomes |
+|---|---|
+| `ghcr.io/c360studio/semserve:qwen3-0.6b` | `ghcr.io/c360studio/seminstruct:qwen3-0.6b` |
+| `ghcr.io/c360studio/semserve:qwen3-1.7b` | `ghcr.io/c360studio/seminstruct:qwen3-1.7b` |
+| (new) | `ghcr.io/c360studio/seminstruct:qwen3-8b` |
+| `SEMSERVE_ALIAS` build arg / env | `MODEL_ALIAS` |
+| `SEMSERVE_REASONING` | `MODEL_REASONING` |
+| Internal port `11435` | Single port `8083` |
 
 ## Project Structure
 
 ```shell
 seminstruct/
-├── Cargo.toml              # Dependencies (axum, reqwest, etc.)
-├── src/main.rs             # HTTP proxy + backend client
-├── Dockerfile              # seminstruct build (2-stage)
-├── Dockerfile.semserve     # llama-server + GGUF baked-in image
-├── docker-compose.yml      # Uses pre-built GHCR images
-├── docker-compose.ci.yml   # CI override (builds semserve from source)
-└── README.md
+├── Dockerfile              # llama-server + GGUF, multi-arch, multi-variant
+├── docker-compose.yml      # Pulls :latest from GHCR
+├── docker-compose.ci.yml   # CI override: builds from source
+├── Taskfile.yml            # Common dev tasks
+└── .github/workflows/ci.yml  # Build + test + matrix publish
 ```
 
-**Stack**:
-
-- **Axum**: Async web framework
-- **Reqwest**: HTTP client for the backend
-- **semserve**: Inference backend (separate container) — `llama-server` with
-  GGUF model baked in. See `Dockerfile.semserve`.
+That's everything. There is no source code — the Dockerfile + the CI
+matrix are the product.
 
 ## License
 
@@ -464,6 +294,7 @@ MIT
 
 ---
 
+**Image**: `ghcr.io/c360studio/seminstruct:{qwen3-0.6b|qwen3-1.7b|qwen3-8b|latest}`
 **Port**: `8083`
-**Backend**: semserve / llama-server (Qwen3-0.6B default `:latest`, Qwen3-1.7B `:qwen3-1.7b`, custom configurable)
 **API**: OpenAI-compatible `/v1/chat/completions`
+**Engine**: llama.cpp `llama-server` (build tag `b8994`)

@@ -1,15 +1,16 @@
-# CI override - builds semserve (llama-server + GGUF) from source for testing.
-# Uses the same default model (Qwen3-0.6B Q4_K_M) as the published :latest
-# image, so the CI integration test exercises the same shape ops will pull.
+# CI override - builds seminstruct from source for integration testing.
+# Mirrors the default :latest image (Qwen3-0.6B Q4_K_M, --reasoning off)
+# so CI exercises the same shape ops will pull.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.ci.yml build
 
 services:
-  semserve:
+  seminstruct:
     build:
       context: .
-      dockerfile: Dockerfile.semserve
+      dockerfile: Dockerfile
       args:
         MODEL_REPO: unsloth/Qwen3-0.6B-GGUF
         MODEL_FILE: Qwen3-0.6B-Q4_K_M.gguf
-        SEMSERVE_ALIAS: qwen3-0.6b
-    image: semserve:ci
+        MODEL_ALIAS: qwen3-0.6b
+        MODEL_REASONING: "off"
+    image: seminstruct:ci

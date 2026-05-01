@@ -1,31 +1,26 @@
-# SemInstruct Quick Start
+# seminstruct Quick Start
 
-**No build required - pre-built images from GHCR!**
+`seminstruct` ships pre-built `llama-server` images with curated GGUF
+models baked in. No build required for the published variants — pull and
+run.
 
 ## Prerequisites
 
-- Docker (with 2GB+ available memory)
-- [Task](https://taskfile.dev/#/installation) (optional but recommended)
+- Docker (with 2GB+ available memory for the default `:latest` image)
+- [Task](https://taskfile.dev/#/installation) (optional)
 
-```bash
-# Install Task
-brew install go-task                  # macOS
-snap install task --classic           # Ubuntu/Linux
-go install github.com/go-task/task/v3/cmd/task@latest  # Go
-```
-
-## Quick Start
+## Pull and Run
 
 ```bash
 cd seminstruct
 
-# 1. Start services (pulls pre-built images)
+# Start (pulls ghcr.io/c360studio/seminstruct:latest = Qwen3-0.6B hot tier)
 docker compose up -d
 
-# 2. Wait for services to be ready (~30s)
-docker compose logs -f semserve
+# Wait for the model to load (~30s on first start)
+docker compose logs -f seminstruct
 
-# 3. Test chat completions (OpenAI-compatible)
+# Test chat completions (OpenAI-compatible)
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -33,136 +28,97 @@ curl http://localhost:8083/v1/chat/completions \
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 
-# 4. View logs
-docker compose logs -f
-
-# 5. Clean up
-docker compose down
-```
-
-No build required - images are pulled from `ghcr.io/c360studio/semserve`.
-
-## Pre-baked Image Variants
-
-CI publishes two image variants tagged by the model inside:
-
-| Tag | Model | Image | Memory | Use |
-|-----|-------|-------|--------|-----|
-| `:qwen3-0.6b` (= `:latest`) | Qwen3-0.6B Q4_K_M | ~600MB | ~1.0GB | Hot path: classify, intent, defaults |
-| `:qwen3-1.7b` | Qwen3-1.7B Q4_K_M | ~1.4GB | ~2.0GB | Quality: community summary, answer synthesis |
-
-For other models build locally with build args:
-
-```bash
-MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
-MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
-SEMSERVE_ALIAS=mistral-7b \
-docker build -f Dockerfile.semserve -t semserve:mistral \
-  --build-arg MODEL_REPO --build-arg MODEL_FILE --build-arg SEMSERVE_ALIAS .
-
-# Then update docker-compose.yml to use semserve:mistral
-```
-
-For deploying both tiers side-by-side with capability-aware routing, see
-the **Deployment Patterns** section in [README.md](./README.md).
-
-## Architecture
-
-```
-┌─────────────────────────────────────┐
-│         seminstruct:8083            │  Lightweight proxy (~256MB)
-└──────────────┬──────────────────────┘
-               │ HTTP
-               ▼
-┌─────────────────────────────────────┐
-│          semserve:11435             │  llama-server (llama.cpp)
-│          -np 4 -cb                  │  4 parallel slots, batched
-└─────────────────────────────────────┘
-```
-
-## Docker Compose Workflow
-
-```bash
-# Start both services (pulls pre-built images)
-docker compose up -d
-
-# Check semserve status
-docker compose logs -f semserve
-
-# Check seminstruct status
-docker compose logs -f seminstruct
-
 # Stop
 docker compose down
 ```
 
-## Troubleshooting
+## Image Variants
 
-### Service won't start
+CI publishes three variants tagged by the model inside:
+
+| Tag | Model | Image | Memory | reasoning | Use |
+|---|---|---|---|---|---|
+| `:qwen3-0.6b` (= `:latest`) | Qwen3-0.6B Q4_K_M | ~600MB | ~1.0GB | `off` | Hot path: classify, intent, defaults |
+| `:qwen3-1.7b` | Qwen3-1.7B Q4_K_M | ~1.4GB | ~2.0GB | `auto` | Quality: community summary, answer synthesis |
+| `:qwen3-8b` | Qwen3-8B Q4_K_M | ~5.3GB | ~6.0GB | `auto` | Premium: high-quality answers, more memory budget |
+
+To run a different tier, edit `docker-compose.yml` to swap the image tag
+and update `MODEL_ALIAS` / `MODEL_REASONING` env to match.
+
+For other models build locally with build args:
 
 ```bash
-# Check semserve logs (model loading)
-docker compose logs semserve
+docker build -t seminstruct:mistral \
+  --build-arg MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
+  --build-arg MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
+  --build-arg MODEL_ALIAS=mistral-7b \
+  --build-arg MODEL_REASONING=off .
+```
 
-# Check seminstruct logs (proxy errors)
+For a multi-tier deployment with capability-aware routing, see the
+**Deployment Patterns** section in [README.md](./README.md).
+
+## Architecture
+
+```text
+┌─────────────────────────────────────┐
+│       seminstruct:8083              │  llama-server (llama.cpp)
+│       ghcr.io/c360studio/           │  -np 4 -cb (4 parallel slots)
+│       seminstruct:<variant>         │  GGUF baked in
+└─────────────────────────────────────┘
+```
+
+That's the whole architecture — one container, one model, OpenAI API.
+
+## Troubleshooting
+
+### Service won't start / model never loads
+
+```bash
 docker compose logs seminstruct
-
-# Restart everything
 docker compose down
 docker compose up -d
 ```
 
-### Backend not healthy
+The first start downloads no model — the GGUF is baked into the image —
+but llama-server still needs ~10-30s to mmap the file and warm up. If
+`/health` doesn't return 200 within ~60s the container is genuinely
+broken; check logs.
+
+### Health check failing
 
 ```bash
-# Check semserve logs
-docker compose logs -f semserve
-
-# Check health directly
-curl http://localhost:11435/health
+curl -v http://localhost:8083/health
 ```
+
+Returns `200 OK` once the model is loaded. Anything else is a real
+failure.
 
 ### Port already in use
 
 ```bash
-# Find what's using ports
-lsof -i :8083  # seminstruct
-lsof -i :11435  # semserve
-
-# Change ports in docker-compose.yml if needed
+lsof -i :8083
+# change the host-side port in docker-compose.yml if needed
 ```
 
 ## Quick Reference
 
-| Service | Port | Purpose |
-|---------|------|---------|
-| seminstruct | 8083 | OpenAI-compatible proxy |
-| semserve | 11435 | Inference backend (llama-server) |
-
 | Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/health` | GET | Health check (includes backend status) |
-| `/ready` | GET | Readiness probe (verifies model is loaded) |
-| `/v1/models` | GET | List available models |
+|---|---|---|
+| `/health` | GET | Liveness/readiness — 200 once model loaded |
+| `/v1/models` | GET | Lists the baked-in model under its alias |
 | `/v1/chat/completions` | POST | OpenAI-compatible chat |
-| `/metrics` | GET | Prometheus metrics |
+| `/metrics` | GET | llama-server's native Prometheus metrics |
 
 **Service URL**: `http://localhost:8083`
 
-**Backend**: semserve / llama-server (Qwen3-0.6B Q4_K_M default `:latest`; Qwen3-1.7B at `:qwen3-1.7b`)
+**Default model**: `qwen3-0.6b` (Qwen3-0.6B Q4_K_M, `--reasoning off`)
 
-**Expected Latency**: 200-400ms per response (Qwen3-0.6B on CPU)
-
-**Memory Usage**:
-
-- seminstruct: ~256MB
-- semserve hot (Qwen3-0.6B): ~1.0GB at `-np 4 -cb -c 2048`
-- semserve quality (Qwen3-1.7B): ~2.0GB at same settings
-- 7B-class custom models: ~4-10GB depending on quantization
+**Expected first-token latency**: 200-400ms for `:qwen3-0.6b` on CPU;
+500ms-1.5s for `:qwen3-1.7b`; 2-5s for `:qwen3-8b` on CPU (GPU
+recommended for the 8B tier).
 
 ## Before You Push
-
-Always run integration tests locally before pushing:
 
 ```bash
 task integration    # Full build + test + cleanup
@@ -170,5 +126,7 @@ task integration    # Full build + test + cleanup
 
 ## Next Steps
 
-- Read [README.md](./README.md) for full documentation
-- Integrate with SemStreams via HTTP client
+- [README.md](./README.md) for full documentation including deployment
+  patterns and resource budgets
+- [semembed](https://github.com/c360studio/semembed) for the embedding tier
+- Integrate via SemStreams's `model_registry` (capability → endpoint URL)
