@@ -10,7 +10,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: c360studio/seminstruct
-  RUST_VERSION: "1.85"
+  RUST_VERSION: "1.95"
 
 jobs:
   build:

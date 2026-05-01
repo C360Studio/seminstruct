@@ -8,7 +8,7 @@
 #   MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
 #   docker build -f Dockerfile.shimmy -t shimmy:custom .
 
-FROM rust:1.85-slim AS builder
+FROM rust:1.95-slim AS builder
 
 RUN apt-get update && apt-get install -y \
     pkg-config \

@@ -3,7 +3,7 @@
 # Supports linux/amd64 and linux/arm64
 
 # Stage 1: Build
-FROM rust:1.85-slim AS builder
+FROM rust:1.95-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && \

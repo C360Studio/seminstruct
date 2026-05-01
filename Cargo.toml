@@ -7,12 +7,12 @@ description = "Lightweight proxy service for OpenAI-compatible LLM inference via
 
 [dependencies]
 # HTTP server
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 
-# HTTP client for shimmy proxy
+# HTTP client for backend proxy
 reqwest = { version = "0.12", features = ["json"] }
 
 # Serialization
@@ -24,18 +24,18 @@ uuid = { version = "1", features = ["v4"] }
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Metrics
-prometheus = "0.13"
+prometheus = "0.14"
 
 [dev-dependencies]
 # Testing
-mockito = "1.6"
+mockito = "1.7"
 
 [profile.release]
 lto = true
