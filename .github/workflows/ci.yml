@@ -207,10 +207,16 @@ jobs:
     name: Push Semserve to GHCR (${{ matrix.variant.alias }})
     runs-on: ubuntu-latest
     needs: [build, security, lint]
-    # Only push semserve when its Dockerfile changes, or on manual trigger
+    # Run on every main push and on manual dispatch. Previously this gated
+    # on `head_commit.modified` containing Dockerfile.semserve, but that
+    # checks only the *latest* commit in a multi-commit push — a trailing
+    # CI-fix commit on top of a Dockerfile change would skip the matrix.
+    # BuildKit GHA cache keeps unchanged-input rebuilds fast (~1-2 min per
+    # variant from cache), so always-run is a cleaner contract than fragile
+    # change-detection on the head commit.
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.modified, 'Dockerfile.semserve'))
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     permissions:
       contents: read
       packages: write
