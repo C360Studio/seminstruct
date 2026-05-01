@@ -22,7 +22,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub shimmy_url: String,
+    pub backend_url: String,
     pub port: u16,
     pub timeout_seconds: u64,
     pub max_retries: u32,
@@ -31,8 +31,8 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         Self {
-            shimmy_url: std::env::var("SEMINSTRUCT_SHIMMY_URL")
-                .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+            backend_url: std::env::var("SEMINSTRUCT_BACKEND_URL")
+                .unwrap_or_else(|_| "http://localhost:11435".to_string()),
             port: std::env::var("SEMINSTRUCT_PORT")
                 .unwrap_or_else(|_| "8083".to_string())
                 .parse()
@@ -128,37 +128,37 @@ pub struct ErrorDetail {
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: String,
-    pub shimmy_url: String,
-    pub shimmy_healthy: bool,
+    pub backend_url: String,
+    pub backend_healthy: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ReadyResponse {
     pub ready: bool,
-    pub shimmy_url: String,
+    pub backend_url: String,
 }
 
 // ============================================================================
-// Shimmy Client
+// Backend Client
 // ============================================================================
 
 #[derive(Debug, Error)]
-pub enum ShimmyError {
+pub enum BackendError {
     #[error("HTTP request failed: {0}")]
     Request(#[from] reqwest::Error),
-    #[error("Shimmy returned error: {status} - {message}")]
-    ShimmyError { status: u16, message: String },
-    #[error("Shimmy is unavailable")]
+    #[error("Backend returned error: {status} - {message}")]
+    Status { status: u16, message: String },
+    #[error("Backend is unavailable")]
     Unavailable,
 }
 
-pub struct ShimmyClient {
+pub struct BackendClient {
     client: Client,
     base_url: String,
     max_retries: u32,
 }
 
-impl ShimmyClient {
+impl BackendClient {
     pub fn new(base_url: String, timeout: Duration, max_retries: u32) -> Self {
         let client = Client::builder()
             .timeout(timeout)
@@ -176,7 +176,7 @@ impl ShimmyClient {
     pub async fn chat_completions(
         &self,
         req: &ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse, ShimmyError> {
+    ) -> Result<ChatCompletionResponse, BackendError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
 
         // Force non-streaming - proxy doesn't support streaming responses yet
@@ -191,7 +191,7 @@ impl ShimmyClient {
             if attempt > 0 {
                 let backoff = Duration::from_millis(100 * (1 << attempt));
                 tokio::time::sleep(backoff).await;
-                warn!("Retrying shimmy request (attempt {})", attempt + 1);
+                warn!("Retrying backend request (attempt {})", attempt + 1);
             }
 
             match self.client.post(&url).json(&request).send().await {
@@ -200,26 +200,26 @@ impl ShimmyClient {
                         return response
                             .json::<ChatCompletionResponse>()
                             .await
-                            .map_err(ShimmyError::from);
+                            .map_err(BackendError::from);
                     } else {
                         let status = response.status().as_u16();
                         let message = response
                             .text()
                             .await
                             .unwrap_or_else(|_| "Unknown error".to_string());
-                        last_error = Some(ShimmyError::ShimmyError { status, message });
+                        last_error = Some(BackendError::Status { status, message });
                     }
                 }
                 Err(e) => {
-                    last_error = Some(ShimmyError::Request(e));
+                    last_error = Some(BackendError::Request(e));
                 }
             }
         }
 
-        Err(last_error.unwrap_or(ShimmyError::Unavailable))
+        Err(last_error.unwrap_or(BackendError::Unavailable))
     }
 
-    pub async fn models(&self) -> Result<ModelsResponse, ShimmyError> {
+    pub async fn models(&self) -> Result<ModelsResponse, BackendError> {
         let url = format!("{}/v1/models", self.base_url);
 
         let response = self.client.get(&url).send().await?;
@@ -228,14 +228,14 @@ impl ShimmyClient {
             response
                 .json::<ModelsResponse>()
                 .await
-                .map_err(ShimmyError::from)
+                .map_err(BackendError::from)
         } else {
             let status = response.status().as_u16();
             let message = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            Err(ShimmyError::ShimmyError { status, message })
+            Err(BackendError::Status { status, message })
         }
     }
 
@@ -247,12 +247,13 @@ impl ShimmyClient {
         }
     }
 
-    /// Check if shimmy is ready to serve inference requests.
+    /// Check if the backend is ready to serve inference requests.
     /// Performs a lightweight inference call to verify the model is loaded.
     pub async fn ready(&self) -> bool {
-        // Use qwen model for readiness check - it's small and always available in CI
+        // Use qwen alias for readiness check - the default GGUF baked into
+        // semserve. llama-server is started with --alias qwen2.5-0.5b.
         let request = ChatCompletionRequest {
-            model: "qwen2.5-0.5b-instruct-q4-k-m".to_string(),
+            model: "qwen2.5-0.5b".to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "hi".to_string(),
@@ -266,7 +267,7 @@ impl ShimmyClient {
         match self.chat_completions(&request).await {
             Ok(_) => true,
             Err(e) => {
-                warn!("Shimmy readiness check failed: {}", e);
+                warn!("Backend readiness check failed: {}", e);
                 false
             }
         }
@@ -278,7 +279,7 @@ impl ShimmyClient {
 // ============================================================================
 
 pub struct AppState {
-    shimmy: ShimmyClient,
+    backend: BackendClient,
     config: Config,
     metrics: Arc<Metrics>,
 }
@@ -292,7 +293,7 @@ pub struct Metrics {
     requests_total: Counter,
     request_duration: Histogram,
     errors_total: Counter,
-    shimmy_errors: Counter,
+    backend_errors: Counter,
 }
 
 impl Metrics {
@@ -317,18 +318,18 @@ impl Metrics {
         ))?;
         registry.register(Box::new(errors_total.clone()))?;
 
-        let shimmy_errors = Counter::with_opts(Opts::new(
-            "seminstruct_shimmy_errors_total",
-            "Total number of shimmy backend errors",
+        let backend_errors = Counter::with_opts(Opts::new(
+            "seminstruct_backend_errors_total",
+            "Total number of inference backend errors",
         ))?;
-        registry.register(Box::new(shimmy_errors.clone()))?;
+        registry.register(Box::new(backend_errors.clone()))?;
 
         Ok(Self {
             registry,
             requests_total,
             request_duration,
             errors_total,
-            shimmy_errors,
+            backend_errors,
         })
     }
 }
@@ -348,24 +349,24 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    info!("Starting seminstruct service (shimmy proxy)");
+    info!("Starting seminstruct service (inference backend proxy)");
 
     // Load configuration
     let config = Config::from_env();
-    info!("Configuration: shimmy_url={}, port={}", config.shimmy_url, config.port);
+    info!("Configuration: backend_url={}, port={}", config.backend_url, config.port);
 
-    // Create shimmy client
-    let shimmy = ShimmyClient::new(
-        config.shimmy_url.clone(),
+    // Create backend client
+    let backend = BackendClient::new(
+        config.backend_url.clone(),
         Duration::from_secs(config.timeout_seconds),
         config.max_retries,
     );
 
-    // Check shimmy health on startup
-    if shimmy.health().await {
-        info!("Shimmy backend is healthy");
+    // Check backend health on startup
+    if backend.health().await {
+        info!("Inference backend is healthy");
     } else {
-        warn!("Shimmy backend is not responding - will retry on requests");
+        warn!("Inference backend is not responding - will retry on requests");
     }
 
     // Initialize metrics
@@ -373,7 +374,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create state
     let state = Arc::new(AppState {
-        shimmy,
+        backend,
         config: config.clone(),
         metrics,
     });
@@ -392,7 +393,7 @@ async fn main() -> anyhow::Result<()> {
     // Start server
     let addr = format!("0.0.0.0:{}", config.port);
     info!("Listening on {}", addr);
-    info!("Proxying to shimmy at {}", config.shimmy_url);
+    info!("Proxying to backend at {}", config.backend_url);
 
     let listener = TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
@@ -400,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// OpenAI-compatible chat completions endpoint (proxied to shimmy)
+/// OpenAI-compatible chat completions endpoint (proxied to inference backend)
 async fn chat_completions_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
@@ -423,29 +424,29 @@ async fn chat_completions_handler(
         ));
     }
 
-    // Proxy request to shimmy
-    match state.shimmy.chat_completions(&req).await {
+    // Proxy request to backend
+    match state.backend.chat_completions(&req).await {
         Ok(response) => {
             timer.observe_duration();
             Ok(Json(response))
         }
         Err(e) => {
-            error!("Shimmy request failed: {}", e);
+            error!("Backend request failed: {}", e);
             state.metrics.errors_total.inc();
-            state.metrics.shimmy_errors.inc();
+            state.metrics.backend_errors.inc();
 
             let (status, message) = match &e {
-                ShimmyError::ShimmyError { status, message } => {
+                BackendError::Status { status, message } => {
                     (StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY), message.clone())
                 }
-                ShimmyError::Unavailable => {
-                    (StatusCode::SERVICE_UNAVAILABLE, "Shimmy backend is unavailable".to_string())
+                BackendError::Unavailable => {
+                    (StatusCode::SERVICE_UNAVAILABLE, "Inference backend is unavailable".to_string())
                 }
-                ShimmyError::Request(req_err) => {
+                BackendError::Request(req_err) => {
                     if req_err.is_timeout() {
-                        (StatusCode::GATEWAY_TIMEOUT, "Request to shimmy timed out".to_string())
+                        (StatusCode::GATEWAY_TIMEOUT, "Request to backend timed out".to_string())
                     } else {
-                        (StatusCode::BAD_GATEWAY, format!("Shimmy request failed: {}", req_err))
+                        (StatusCode::BAD_GATEWAY, format!("Backend request failed: {}", req_err))
                     }
                 }
             };
@@ -456,7 +457,7 @@ async fn chat_completions_handler(
                     error: ErrorDetail {
                         message,
                         error_type: "backend_error".to_string(),
-                        code: Some("shimmy_error".to_string()),
+                        code: Some("backend_error".to_string()),
                     },
                 }),
             ))
@@ -464,19 +465,19 @@ async fn chat_completions_handler(
     }
 }
 
-/// List available models (proxied from shimmy)
+/// List available models (proxied from backend)
 async fn models_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.shimmy.models().await {
+    match state.backend.models().await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(e) => {
-            error!("Failed to get models from shimmy: {}", e);
+            error!("Failed to get models from backend: {}", e);
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
                     error: ErrorDetail {
-                        message: "Failed to get models from shimmy".to_string(),
+                        message: "Failed to get models from backend".to_string(),
                         error_type: "backend_error".to_string(),
-                        code: Some("shimmy_error".to_string()),
+                        code: Some("backend_error".to_string()),
                     },
                 }),
             )
@@ -486,23 +487,23 @@ async fn models_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let shimmy_healthy = state.shimmy.health().await;
+    let backend_healthy = state.backend.health().await;
 
-    // Always return 200 - proxy is healthy, shimmy status in body
+    // Always return 200 - proxy is healthy, backend status in body
     (
         StatusCode::OK,
         Json(HealthResponse {
-            status: if shimmy_healthy { "healthy" } else { "degraded" }.to_string(),
-            shimmy_url: state.config.shimmy_url.clone(),
-            shimmy_healthy,
+            status: if backend_healthy { "healthy" } else { "degraded" }.to_string(),
+            backend_url: state.config.backend_url.clone(),
+            backend_healthy,
         }),
     )
 }
 
-/// Readiness check - returns 200 only when shimmy can complete inference.
+/// Readiness check - returns 200 only when the backend can complete inference.
 /// Use this for Kubernetes readiness probes.
 async fn ready_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let ready = state.shimmy.ready().await;
+    let ready = state.backend.ready().await;
 
     let status = if ready {
         StatusCode::OK
@@ -514,7 +515,7 @@ async fn ready_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         status,
         Json(ReadyResponse {
             ready,
-            shimmy_url: state.config.shimmy_url.clone(),
+            backend_url: state.config.backend_url.clone(),
         }),
     )
 }
@@ -569,14 +570,14 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let _guard = env_guard();
-        std::env::remove_var("SEMINSTRUCT_SHIMMY_URL");
+        std::env::remove_var("SEMINSTRUCT_BACKEND_URL");
         std::env::remove_var("SEMINSTRUCT_PORT");
         std::env::remove_var("SEMINSTRUCT_TIMEOUT_SECONDS");
         std::env::remove_var("SEMINSTRUCT_MAX_RETRIES");
 
         let config = Config::from_env();
 
-        assert_eq!(config.shimmy_url, "http://localhost:8080");
+        assert_eq!(config.backend_url, "http://localhost:11435");
         assert_eq!(config.port, 8083);
         assert_eq!(config.timeout_seconds, 120);
         assert_eq!(config.max_retries, 3);
@@ -585,19 +586,19 @@ mod tests {
     #[test]
     fn test_config_from_env() {
         let _guard = env_guard();
-        std::env::set_var("SEMINSTRUCT_SHIMMY_URL", "http://shimmy:9000");
+        std::env::set_var("SEMINSTRUCT_BACKEND_URL", "http://semserve:9000");
         std::env::set_var("SEMINSTRUCT_PORT", "9999");
         std::env::set_var("SEMINSTRUCT_TIMEOUT_SECONDS", "60");
         std::env::set_var("SEMINSTRUCT_MAX_RETRIES", "5");
 
         let config = Config::from_env();
 
-        assert_eq!(config.shimmy_url, "http://shimmy:9000");
+        assert_eq!(config.backend_url, "http://semserve:9000");
         assert_eq!(config.port, 9999);
         assert_eq!(config.timeout_seconds, 60);
         assert_eq!(config.max_retries, 5);
 
-        std::env::remove_var("SEMINSTRUCT_SHIMMY_URL");
+        std::env::remove_var("SEMINSTRUCT_BACKEND_URL");
         std::env::remove_var("SEMINSTRUCT_PORT");
         std::env::remove_var("SEMINSTRUCT_TIMEOUT_SECONDS");
         std::env::remove_var("SEMINSTRUCT_MAX_RETRIES");
@@ -628,25 +629,25 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // ShimmyError Tests
+    // BackendError Tests
     // ------------------------------------------------------------------------
 
     #[test]
-    fn test_shimmy_error_display_shimmy_error() {
-        let err = ShimmyError::ShimmyError {
+    fn test_backend_error_display_status() {
+        let err = BackendError::Status {
             status: 500,
             message: "Internal server error".to_string(),
         };
         assert_eq!(
             err.to_string(),
-            "Shimmy returned error: 500 - Internal server error"
+            "Backend returned error: 500 - Internal server error"
         );
     }
 
     #[test]
-    fn test_shimmy_error_display_unavailable() {
-        let err = ShimmyError::Unavailable;
-        assert_eq!(err.to_string(), "Shimmy is unavailable");
+    fn test_backend_error_display_unavailable() {
+        let err = BackendError::Unavailable;
+        assert_eq!(err.to_string(), "Backend is unavailable");
     }
 
     // ------------------------------------------------------------------------
@@ -726,13 +727,13 @@ mod tests {
     fn test_health_response_serialization() {
         let resp = HealthResponse {
             status: "healthy".to_string(),
-            shimmy_url: "http://shimmy:8080".to_string(),
-            shimmy_healthy: true,
+            backend_url: "http://semserve:11435".to_string(),
+            backend_healthy: true,
         };
 
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"status\":\"healthy\""));
-        assert!(json.contains("\"shimmy_healthy\":true"));
+        assert!(json.contains("\"backend_healthy\":true"));
     }
 
     #[test]
@@ -771,10 +772,10 @@ mod tests {
             "object": "list",
             "data": [
                 {
-                    "id": "mistral-7b-instruct",
+                    "id": "qwen2.5-0.5b",
                     "object": "model",
                     "created": 1699000000,
-                    "owned_by": "shimmy"
+                    "owned_by": "llama-server"
                 }
             ]
         }"#;
@@ -783,8 +784,8 @@ mod tests {
 
         assert_eq!(resp.object, "list");
         assert_eq!(resp.data.len(), 1);
-        assert_eq!(resp.data[0].id, "mistral-7b-instruct");
-        assert_eq!(resp.data[0].owned_by, "shimmy");
+        assert_eq!(resp.data[0].id, "qwen2.5-0.5b");
+        assert_eq!(resp.data[0].owned_by, "llama-server");
     }
 
     // ------------------------------------------------------------------------
@@ -798,7 +799,7 @@ mod tests {
         // Increment counters to verify they work
         metrics.requests_total.inc();
         metrics.errors_total.inc();
-        metrics.shimmy_errors.inc();
+        metrics.backend_errors.inc();
 
         // Observe histogram
         let timer = metrics.request_duration.start_timer();
@@ -810,11 +811,11 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // ShimmyClient Tests (with mockito)
+    // BackendClient Tests (with mockito)
     // ------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_shimmy_client_health_success() {
+    async fn test_backend_client_health_success() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/health")
@@ -823,7 +824,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ShimmyClient::new(
+        let client = BackendClient::new(
             server.url(),
             Duration::from_secs(5),
             3,
@@ -835,7 +836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shimmy_client_health_failure() {
+    async fn test_backend_client_health_failure() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/health")
@@ -843,7 +844,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ShimmyClient::new(
+        let client = BackendClient::new(
             server.url(),
             Duration::from_secs(5),
             3,
@@ -855,9 +856,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shimmy_client_health_connection_refused() {
+    async fn test_backend_client_health_connection_refused() {
         // Use an invalid URL that won't connect
-        let client = ShimmyClient::new(
+        let client = BackendClient::new(
             "http://127.0.0.1:1".to_string(),
             Duration::from_millis(100),
             0,
@@ -868,16 +869,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shimmy_client_models_success() {
+    async fn test_backend_client_models_success() {
         let mut server = mockito::Server::new_async().await;
 
         let models_response = ModelsResponse {
             object: "list".to_string(),
             data: vec![ModelInfo {
-                id: "mistral-7b-instruct".to_string(),
+                id: "qwen2.5-0.5b".to_string(),
                 object: "model".to_string(),
                 created: 1699000000,
-                owned_by: "shimmy".to_string(),
+                owned_by: "llama-server".to_string(),
             }],
         };
 
@@ -889,7 +890,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ShimmyClient::new(
+        let client = BackendClient::new(
             server.url(),
             Duration::from_secs(5),
             3,
@@ -900,12 +901,12 @@ mod tests {
 
         let models = result.unwrap();
         assert_eq!(models.data.len(), 1);
-        assert_eq!(models.data[0].id, "mistral-7b-instruct");
+        assert_eq!(models.data[0].id, "qwen2.5-0.5b");
         mock.assert_async().await;
     }
 
     #[tokio::test]
-    async fn test_shimmy_client_models_error() {
+    async fn test_backend_client_models_error() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/v1/models")
@@ -914,7 +915,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ShimmyClient::new(
+        let client = BackendClient::new(
             server.url(),
             Duration::from_secs(5),
             3,
@@ -924,24 +925,24 @@ mod tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            ShimmyError::ShimmyError { status, message } => {
+            BackendError::Status { status, message } => {
                 assert_eq!(status, 500);
                 assert!(message.contains("Internal Server Error"));
             }
-            _ => panic!("Expected ShimmyError"),
+            _ => panic!("Expected BackendError::Status"),
         }
         mock.assert_async().await;
     }
 
     #[tokio::test]
-    async fn test_shimmy_client_chat_completions_success() {
+    async fn test_backend_client_chat_completions_success() {
         let mut server = mockito::Server::new_async().await;
 
         let response = ChatCompletionResponse {
             id: "chatcmpl-test123".to_string(),
             object: "chat.completion".to_string(),
             created: 1699000000,
-            model: "mistral-7b-instruct".to_string(),
+            model: "qwen2.5-0.5b".to_string(),
             choices: vec![ChatChoice {
                 index: 0,
                 message: ChatMessage {
@@ -965,14 +966,14 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ShimmyClient::new(
+        let client = BackendClient::new(
             server.url(),
             Duration::from_secs(5),
             3,
         );
 
         let request = ChatCompletionRequest {
-            model: "mistral-7b-instruct".to_string(),
+            model: "qwen2.5-0.5b".to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "Hello!".to_string(),
@@ -994,7 +995,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shimmy_client_chat_completions_error() {
+    async fn test_backend_client_chat_completions_error() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("POST", "/v1/chat/completions")
@@ -1003,7 +1004,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ShimmyClient::new(
+        let client = BackendClient::new(
             server.url(),
             Duration::from_secs(5),
             0, // No retries for faster test
@@ -1025,11 +1026,11 @@ mod tests {
         assert!(result.is_err());
 
         match result.unwrap_err() {
-            ShimmyError::ShimmyError { status, message } => {
+            BackendError::Status { status, message } => {
                 assert_eq!(status, 400);
                 assert!(message.contains("Invalid model"));
             }
-            _ => panic!("Expected ShimmyError"),
+            _ => panic!("Expected BackendError::Status"),
         }
         mock.assert_async().await;
     }
@@ -1053,18 +1054,18 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // ShimmyClient Unit Tests (without HTTP mocking)
+    // BackendClient Unit Tests (without HTTP mocking)
     // ------------------------------------------------------------------------
 
     #[test]
-    fn test_shimmy_client_creation() {
-        let client = ShimmyClient::new(
-            "http://localhost:8080".to_string(),
+    fn test_backend_client_creation() {
+        let client = BackendClient::new(
+            "http://localhost:11435".to_string(),
             Duration::from_secs(30),
             5,
         );
 
-        assert_eq!(client.base_url, "http://localhost:8080");
+        assert_eq!(client.base_url, "http://localhost:11435");
         assert_eq!(client.max_retries, 5);
     }
 }

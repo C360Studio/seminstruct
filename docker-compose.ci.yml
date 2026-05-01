@@ -1,12 +1,12 @@
-# CI override - builds shimmy from source for testing
+# CI override - builds semserve (llama-server + GGUF) from source for testing.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.ci.yml build
 
 services:
-  shimmy:
+  semserve:
     build:
       context: .
-      dockerfile: Dockerfile.shimmy
+      dockerfile: Dockerfile.semserve
       args:
         MODEL_REPO: Qwen/Qwen2.5-0.5B-Instruct-GGUF
         MODEL_FILE: qwen2.5-0.5b-instruct-q4_k_m.gguf
-    image: shimmy:ci
+    image: semserve:ci

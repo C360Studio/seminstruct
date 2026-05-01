@@ -1,0 +1,113 @@
+# semserve - llama-server (from llama.cpp) with a GGUF model baked in.
+#
+# Replaces the prior shimmy-based backend. Wins from the swap:
+#   - Concurrent inference: -np 4 -cb (4 parallel slots, continuous batching).
+#     This is the real fix for stacked graph-search requests timing out.
+#   - Direct upstream of llama.cpp; no third-party wrapper layer.
+#   - Active daily maintenance vs shimmy's slowdown.
+#
+# Default model: Qwen2.5-0.5B Q4_K_M (~491MB) - edge / CI friendly.
+# Override via build args:
+#
+#   MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
+#   MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
+#   docker build -f Dockerfile.semserve -t semserve:custom .
+
+# ============================================================================
+# Stage 1: Build llama-server from source
+# ============================================================================
+FROM debian:bookworm-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ca-certificates \
+    libcurl4-openssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Pin to a specific build tag for reproducibility. Bump intentionally.
+# llama.cpp uses bNNNN build-number tags (immutable).
+ARG LLAMA_CPP_TAG=b8994
+
+RUN git clone --depth 1 --branch ${LLAMA_CPP_TAG} \
+    https://github.com/ggml-org/llama.cpp.git .
+
+# GGML_NATIVE=OFF: portable build (works for amd64 + arm64, no -march=native).
+# LLAMA_CURL=ON: enables -hf model fetching, which we don't use, but the
+#   feature is needed by the server target as of recent builds.
+# -j2 caps parallelism: llama.cpp's heavier translation units consume
+# ~1-2GB each in cc1plus, and the default `-j` (all cores) ooms on
+# Docker Desktop and 4-core CI runners. The build time trade is worth it.
+RUN cmake -B build \
+    -DGGML_NATIVE=OFF \
+    -DLLAMA_CURL=ON \
+    -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --config Release -j2 --target llama-server
+
+# ============================================================================
+# Stage 2: Download GGUF model
+# ============================================================================
+FROM python:3.11-slim AS model-downloader
+
+RUN pip install --no-cache-dir huggingface-hub
+
+WORKDIR /models
+
+ARG MODEL_REPO=Qwen/Qwen2.5-0.5B-Instruct-GGUF
+ARG MODEL_FILE=qwen2.5-0.5b-instruct-q4_k_m.gguf
+
+# Download then rename to a fixed path so the runtime CMD doesn't depend
+# on the build-arg filename.
+RUN python -c "from huggingface_hub import hf_hub_download; \
+    hf_hub_download('${MODEL_REPO}', '${MODEL_FILE}', \
+                    local_dir='.', local_dir_use_symlinks=False)" \
+    && mv "${MODEL_FILE}" model.gguf
+
+# ============================================================================
+# Stage 3: Runtime
+# ============================================================================
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libcurl4 \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the llama-server binary plus its shared libs from the builder.
+COPY --from=builder /build/build/bin/llama-server /usr/local/bin/llama-server
+COPY --from=builder /build/build/bin/*.so* /usr/local/lib/
+RUN ldconfig
+
+# Copy the baked-in model.
+COPY --from=model-downloader /models/model.gguf /models/model.gguf
+
+EXPOSE 11435
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
+    CMD curl -f http://localhost:11435/health || exit 1
+
+# Flags:
+#   --host/-port: bind to 0.0.0.0:11435 (matches existing default).
+#   -m: path to baked-in GGUF.
+#   --alias: stable model id surfaced in /v1/models, regardless of GGUF
+#            filename or model swap. Seminstruct's readiness probe keys
+#            off this name.
+#   -np 4: four parallel inference slots — the concurrency win.
+#   -cb: continuous batching across slots (group prefill + decode work).
+#   -c 2048: context size per slot (8192 total). Plenty for 0.5b model
+#            and keeps memory bounded.
+ENTRYPOINT ["llama-server"]
+CMD ["--host", "0.0.0.0", \
+     "--port", "11435", \
+     "-m", "/models/model.gguf", \
+     "--alias", "qwen2.5-0.5b", \
+     "-np", "4", \
+     "-cb", \
+     "-c", "2048"]

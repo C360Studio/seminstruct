@@ -1,13 +1,13 @@
 version: '3'
 
 # SemInstruct - Containerized Development Workflow
-# Lightweight proxy to shimmy for OpenAI-compatible inference
+# Lightweight proxy in front of an OpenAI-compatible inference backend (semserve)
 
 vars:
   IMAGE_NAME: semstreams-seminstruct
   CONTAINER_NAME: seminstruct-dev
   PORT: 8083
-  SHIMMY_PORT: 11435
+  SEMSERVE_PORT: 11435
 
 tasks:
   # Build tasks
@@ -34,7 +34,7 @@ tasks:
 
   # Docker Compose (recommended way to run)
   up:
-    desc: Start seminstruct + shimmy with docker-compose
+    desc: Start seminstruct + semserve with docker-compose
     cmds:
       - docker compose up -d
       - echo "Services starting..."
@@ -51,19 +51,19 @@ tasks:
   integration:
     desc: Run full integration tests locally (run before push!)
     cmds:
-      - echo "Building services (shimmy from source)..."
+      - echo "Building services (semserve from source)..."
       - docker compose -f docker-compose.yml -f docker-compose.ci.yml build
       - docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
       - |
-        echo "Waiting for shimmy..."
+        echo "Waiting for semserve..."
         for i in $(seq 1 90); do
-          if curl -sf http://localhost:{{.SHIMMY_PORT}}/health 2>/dev/null; then
-            echo "Shimmy ready!"
+          if curl -sf http://localhost:{{.SEMSERVE_PORT}}/health 2>/dev/null; then
+            echo "Semserve ready!"
             break
           fi
           if [ $i -eq 90 ]; then
-            echo "Shimmy timeout"
-            docker compose logs shimmy
+            echo "Semserve timeout"
+            docker compose logs semserve
             exit 1
           fi
           echo "Attempt $i/90..."
@@ -122,12 +122,12 @@ tasks:
       - curl -f http://localhost:{{.PORT}}/health || (echo "Health check failed" && exit 1)
       - echo "Health check passed"
 
-  test:shimmy:
-    desc: Test shimmy backend directly
+  test:semserve:
+    desc: Test semserve backend directly
     cmds:
-      - echo "Testing shimmy backend..."
-      - curl -f http://localhost:{{.SHIMMY_PORT}}/health || (echo "Shimmy health check failed" && exit 1)
-      - echo "Shimmy health check passed"
+      - echo "Testing semserve backend..."
+      - curl -f http://localhost:{{.SEMSERVE_PORT}}/health || (echo "Semserve health check failed" && exit 1)
+      - echo "Semserve health check passed"
 
   test:chat:
     desc: Test chat completions endpoint (OpenAI-compatible)
@@ -165,10 +165,10 @@ tasks:
     cmds:
       - docker compose logs -f seminstruct
 
-  logs:shimmy:
-    desc: View shimmy logs only
+  logs:semserve:
+    desc: View semserve logs only
     cmds:
-      - docker compose logs -f shimmy
+      - docker compose logs -f semserve
 
   # Metrics and monitoring
   metrics:
@@ -196,10 +196,10 @@ tasks:
       - echo "Image removed"
 
   clean:cache:
-    desc: Remove shimmy model cache volume
+    desc: Remove semserve model cache volume
     deps: [clean]
     cmds:
-      - docker volume rm seminstruct_shimmy-cache 2>/dev/null || true
+      - docker volume rm seminstruct_semserve-cache 2>/dev/null || true
       - echo "Model cache removed"
 
   clean:all:
@@ -214,11 +214,11 @@ tasks:
     cmds:
       - task build
       - task up
-      - echo "Waiting for shimmy to load model (this may take a few minutes)..."
+      - echo "Waiting for semserve to load model (this may take a few minutes)..."
       - |
         for i in $(seq 1 60); do
-          if curl -sf http://localhost:{{.SHIMMY_PORT}}/health > /dev/null 2>&1; then
-            echo "Shimmy is ready"
+          if curl -sf http://localhost:{{.SEMSERVE_PORT}}/health > /dev/null 2>&1; then
+            echo "Semserve is ready"
             break
           fi
           echo "  Waiting... ($i/60)"
@@ -250,7 +250,7 @@ tasks:
         echo "SemInstruct - OpenAI-Compatible Inference Proxy"
         echo ""
         echo "Quick Start:"
-        echo "  task up               # Start seminstruct + shimmy"
+        echo "  task up               # Start seminstruct + semserve"
         echo "  task logs             # View service logs"
         echo "  task test:chat        # Test chat completions"
         echo ""
@@ -260,8 +260,8 @@ tasks:
         echo "  task down             # Stop all services"
         echo ""
         echo "Testing:"
-        echo "  task test:health      # Health check (includes shimmy status)"
-        echo "  task test:shimmy      # Test shimmy directly"
+        echo "  task test:health      # Health check (includes backend status)"
+        echo "  task test:semserve    # Test semserve directly"
         echo "  task test:chat        # Chat completions test"
         echo "  task test:models      # Models endpoint test"
         echo "  task test:all         # All tests"
@@ -273,7 +273,7 @@ tasks:
         echo "Logging:"
         echo "  task logs             # All service logs"
         echo "  task logs:seminstruct # Proxy logs only"
-        echo "  task logs:shimmy      # Backend logs only"
+        echo "  task logs:semserve    # Backend logs only"
         echo ""
         echo "Development:"
         echo "  task dev              # Full dev cycle"

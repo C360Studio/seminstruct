@@ -1,5 +1,5 @@
 # Multi-stage build for seminstruct service
-# Lightweight proxy to shimmy for OpenAI-compatible inference
+# Lightweight proxy to an OpenAI-compatible inference backend (semserve)
 # Supports linux/amd64 and linux/arm64
 
 # Stage 1: Build
@@ -51,7 +51,7 @@ RUN chown -R seminstruct:seminstruct /app
 USER seminstruct
 
 # Environment variables with defaults
-ENV SEMINSTRUCT_SHIMMY_URL=http://shimmy:11435
+ENV SEMINSTRUCT_BACKEND_URL=http://semserve:11435
 ENV SEMINSTRUCT_PORT=8083
 ENV SEMINSTRUCT_TIMEOUT_SECONDS=120
 ENV SEMINSTRUCT_MAX_RETRIES=3

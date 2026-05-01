@@ -1,6 +1,6 @@
 # SemInstruct - Local Development
-# Lightweight proxy to shimmy for OpenAI-compatible inference
-# seminstruct proxies requests to shimmy which handles actual model inference
+# Lightweight proxy in front of an OpenAI-compatible inference backend (semserve).
+# semserve runs llama-server (llama.cpp) with a GGUF model baked in.
 
 services:
   # Lightweight proxy service (~256MB memory)
@@ -13,13 +13,13 @@ services:
     ports:
       - "8083:8083"
     environment:
-      - SEMINSTRUCT_SHIMMY_URL=http://shimmy:11435
+      - SEMINSTRUCT_BACKEND_URL=http://semserve:11435
       - SEMINSTRUCT_PORT=8083
       - SEMINSTRUCT_TIMEOUT_SECONDS=120
       - SEMINSTRUCT_MAX_RETRIES=3
       - RUST_LOG=info
     depends_on:
-      shimmy:
+      semserve:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
@@ -37,12 +37,13 @@ services:
           memory: 64M
           cpus: '0.25'
 
-  # Shimmy inference backend with Qwen2.5-0.5B baked in
-  # Pre-built image from GHCR - no build required
-  # For custom models, use Dockerfile.shimmy instead
-  shimmy:
-    image: ghcr.io/c360studio/semshimmy:latest
-    container_name: shimmy-dev
+  # Inference backend: llama-server (llama.cpp) with Qwen2.5-0.5B baked in.
+  # Pre-built image from GHCR - no build required.
+  # For custom models, use Dockerfile.semserve with the docker-compose.ci.yml
+  # override (which builds from source with model build args).
+  semserve:
+    image: ghcr.io/c360studio/semserve:latest
+    container_name: semserve-dev
     ports:
       - "11435:11435"
     healthcheck:

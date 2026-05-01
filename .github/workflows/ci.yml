@@ -16,7 +16,7 @@ jobs:
   build:
     name: Build and Test
     runs-on: ubuntu-latest
-    timeout-minutes: 45  # Allow time for shimmy build + model download
+    timeout-minutes: 45  # Allow time for llama-server build + model download
 
     steps:
       - name: Checkout code
@@ -25,9 +25,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build services (shimmy from source + seminstruct)
+      - name: Build services (semserve from source + seminstruct)
         run: |
-          echo "Building shimmy from source and seminstruct..."
+          echo "Building semserve (llama-server + GGUF) from source and seminstruct..."
           docker compose -f docker-compose.yml -f docker-compose.ci.yml build
 
       - name: Start services
@@ -35,19 +35,19 @@ jobs:
           echo "Starting services with small model (Qwen2.5-0.5B)..."
           docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
 
-      - name: Wait for shimmy model load
+      - name: Wait for semserve model load
         run: |
-          echo "Waiting for shimmy to download and load model..."
+          echo "Waiting for semserve (llama-server) to load model..."
           for i in {1..90}; do
             if curl -sf http://localhost:11435/health 2>/dev/null; then
-              echo "Shimmy is ready!"
+              echo "Semserve is ready!"
               exit 0
             fi
             echo "Attempt $i/90: Model loading..."
             sleep 5
           done
-          echo "Shimmy failed to start"
-          docker compose logs shimmy
+          echo "Semserve failed to start"
+          docker compose logs semserve
           exit 1
 
       - name: Wait for seminstruct
@@ -69,11 +69,11 @@ jobs:
         run: |
           response=$(curl -s http://localhost:8083/health)
           echo "Health response: $response"
-          echo "$response" | grep -q '"shimmy_healthy":true' || (echo "Expected shimmy_healthy:true" && exit 1)
+          echo "$response" | grep -q '"backend_healthy":true' || (echo "Expected backend_healthy:true" && exit 1)
 
       - name: Test ready endpoint (waits for model load)
         run: |
-          echo "Waiting for shimmy model to load via /ready endpoint..."
+          echo "Waiting for semserve model to load via /ready endpoint..."
           for i in {1..60}; do
             response=$(curl -s http://localhost:8083/ready)
             echo "Attempt $i/60: $response"
@@ -96,13 +96,12 @@ jobs:
       - name: Test chat completions endpoint (integration)
         run: |
           echo "Testing chat completions endpoint..."
-          # Get available models from shimmy
+          # Get available models from semserve. llama-server is launched with
+          # --alias qwen2.5-0.5b so that id should always be present.
           models=$(curl -s http://localhost:8083/v1/models)
           echo "Available models: $models"
-          # Find qwen model (shimmy may list default phi3-lora first)
           model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("qwen")) | .id' | head -1)
           if [ -z "$model_id" ]; then
-            # Fallback to last model if qwen not found
             model_id=$(echo "$models" | jq -r '.data[-1].id // empty')
           fi
           echo "Selected model: $model_id"
@@ -110,13 +109,12 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"model\":\"$model_id\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20,\"stream\":false}")
           echo "Response: $response"
-          # Verify we get valid JSON with actual content
           echo "$response" | jq -e '.choices[0].message.content' || (echo "No content in response" && exit 1)
           echo "Integration test passed!"
 
-      - name: View shimmy logs
+      - name: View semserve logs
         if: always()
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml logs shimmy
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml logs semserve
 
       - name: View seminstruct logs
         if: always()
@@ -205,14 +203,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  push-shimmy:
-    name: Push Shimmy to GHCR
+  push-semserve:
+    name: Push Semserve to GHCR
     runs-on: ubuntu-latest
     needs: [build, security, lint]
-    # Only push shimmy when its Dockerfile changes, or on manual trigger
+    # Only push semserve when its Dockerfile changes, or on manual trigger
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.modified, 'Dockerfile.shimmy'))
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.modified, 'Dockerfile.semserve'))
     permissions:
       contents: read
       packages: write
@@ -234,7 +232,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/c360studio/semshimmy
+          images: ghcr.io/c360studio/semserve
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=qwen2.5-0.5b,enable={{is_default_branch}}
@@ -244,7 +242,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.shimmy
+          file: Dockerfile.semserve
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

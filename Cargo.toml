@@ -3,7 +3,7 @@ name = "seminstruct"
 version = "0.2.0"
 edition = "2021"
 authors = ["C360 Team"]
-description = "Lightweight proxy service for OpenAI-compatible LLM inference via shimmy"
+description = "Lightweight proxy service for OpenAI-compatible LLM inference via semserve (llama.cpp)"
 
 [dependencies]
 # HTTP server

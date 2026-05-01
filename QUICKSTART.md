@@ -23,13 +23,13 @@ cd seminstruct
 docker compose up -d
 
 # 2. Wait for services to be ready (~30s)
-docker compose logs -f shimmy
+docker compose logs -f semserve
 
 # 3. Test chat completions (OpenAI-compatible)
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "test",
+    "model": "qwen2.5-0.5b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 
@@ -40,11 +40,11 @@ docker compose logs -f
 docker compose down
 ```
 
-No build required - images are pulled from `ghcr.io/c360studio/semshimmy`.
+No build required - images are pulled from `ghcr.io/c360studio/semserve`.
 
 ## Custom Models
 
-Default image uses Qwen2.5-0.5B (~491MB). For larger models, build with Dockerfile.shimmy:
+Default image uses Qwen2.5-0.5B (~491MB). For larger models, build with `Dockerfile.semserve`:
 
 | Resources | Model | Size | Notes |
 |-----------|-------|------|-------|
@@ -56,9 +56,9 @@ Default image uses Qwen2.5-0.5B (~491MB). For larger models, build with Dockerfi
 # Build custom model image
 MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
 MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
-docker build -f Dockerfile.shimmy -t shimmy:custom .
+docker build -f Dockerfile.semserve -t semserve:custom .
 
-# Then update docker-compose.yml to use shimmy:custom
+# Then update docker-compose.yml to use semserve:custom
 ```
 
 ## Architecture
@@ -70,7 +70,8 @@ docker build -f Dockerfile.shimmy -t shimmy:custom .
                │ HTTP
                ▼
 ┌─────────────────────────────────────┐
-│          shimmy:11435               │  Inference backend (~1-26GB)
+│          semserve:11435             │  llama-server (llama.cpp)
+│          -np 4 -cb                  │  4 parallel slots, batched
 └─────────────────────────────────────┘
 ```
 
@@ -80,8 +81,8 @@ docker build -f Dockerfile.shimmy -t shimmy:custom .
 # Start both services (pulls pre-built images)
 docker compose up -d
 
-# Check shimmy status
-docker compose logs -f shimmy
+# Check semserve status
+docker compose logs -f semserve
 
 # Check seminstruct status
 docker compose logs -f seminstruct
@@ -95,8 +96,8 @@ docker compose down
 ### Service won't start
 
 ```bash
-# Check shimmy logs (model download/loading)
-docker compose logs shimmy
+# Check semserve logs (model loading)
+docker compose logs semserve
 
 # Check seminstruct logs (proxy errors)
 docker compose logs seminstruct
@@ -106,11 +107,11 @@ docker compose down
 docker compose up -d
 ```
 
-### Shimmy not healthy
+### Backend not healthy
 
 ```bash
-# Check shimmy logs
-docker compose logs -f shimmy
+# Check semserve logs
+docker compose logs -f semserve
 
 # Check health directly
 curl http://localhost:11435/health
@@ -121,7 +122,7 @@ curl http://localhost:11435/health
 ```bash
 # Find what's using ports
 lsof -i :8083  # seminstruct
-lsof -i :11435  # shimmy
+lsof -i :11435  # semserve
 
 # Change ports in docker-compose.yml if needed
 ```
@@ -131,25 +132,26 @@ lsof -i :11435  # shimmy
 | Service | Port | Purpose |
 |---------|------|---------|
 | seminstruct | 8083 | OpenAI-compatible proxy |
-| shimmy | 11435 | Inference backend |
+| semserve | 11435 | Inference backend (llama-server) |
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/health` | GET | Health check (includes shimmy status) |
+| `/health` | GET | Health check (includes backend status) |
+| `/ready` | GET | Readiness probe (verifies model is loaded) |
 | `/v1/models` | GET | List available models |
 | `/v1/chat/completions` | POST | OpenAI-compatible chat |
 | `/metrics` | GET | Prometheus metrics |
 
 **Service URL**: `http://localhost:8083`
 
-**Backend**: shimmy (Qwen2.5-0.5B default, configurable)
+**Backend**: semserve / llama-server (Qwen2.5-0.5B default, configurable)
 
-**Expected Latency**: 300-500ms per response
+**Expected Latency**: 300-500ms per response (Qwen2.5-0.5B on CPU)
 
 **Memory Usage**:
 
 - seminstruct: ~256MB
-- shimmy: ~4-10GB (depends on quantization: Q2_K ~4GB, Q8_0 ~10GB)
+- semserve: ~1-2GB for Qwen2.5-0.5B Q4_K_M; ~4-10GB for 7B models depending on quantization
 
 ## Before You Push
 
