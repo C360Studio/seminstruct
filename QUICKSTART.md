@@ -38,9 +38,14 @@ CI publishes three variants tagged by the model inside:
 
 | Tag | Model | Image | Memory | reasoning | Use |
 |---|---|---|---|---|---|
-| `:qwen3-0.6b` (= `:latest`) | Qwen3-0.6B Q4_K_M | ~600MB | ~1.0GB | `off` | Hot path: classify, intent, defaults |
-| `:qwen3-1.7b` | Qwen3-1.7B Q4_K_M | ~1.4GB | ~2.0GB | `auto` | Quality: community summary, answer synthesis |
-| `:qwen3-8b` | Qwen3-8B Q4_K_M | ~5.3GB | ~6.0GB | `auto` | Premium: high-quality answers, more memory budget |
+| `:qwen3-0.6b` (= `:latest`) | Qwen3-0.6B Q4_K_M | ~600MB | ~1.0GB | `off` | Hot path: classify, intent, `defaults.model` |
+| `:qwen3-8b` | Qwen3-8B Q4_K_M | ~5.3GB | ~6.0GB | `auto` | **Recommended summary tier**: community_summary, answer_synthesis (graph-persisting work) |
+| `:qwen3-1.7b` | Qwen3-1.7B Q4_K_M | ~1.4GB | ~2.0GB | `auto` | Memory-constrained summary fallback (only if 8B won't fit; expect quality degradation) |
+
+The 8B is the recommended summary tier because community summaries get
+persisted into the graph and downstream queries compound their errors.
+See README's "Image Variants" section for the rationale and the
+GraphRAG context.
 
 To run a different tier, edit `docker-compose.yml` to swap the image tag
 and update `MODEL_ALIAS` / `MODEL_REASONING` env to match.
