@@ -37,10 +37,10 @@ services:
           memory: 64M
           cpus: '0.25'
 
-  # Inference backend: llama-server (llama.cpp) with Qwen2.5-0.5B baked in.
-  # Pre-built image from GHCR - no build required.
-  # For custom models, use Dockerfile.semserve with the docker-compose.ci.yml
-  # override (which builds from source with model build args).
+  # Inference backend: llama-server (llama.cpp) with Qwen3-0.6B Q4_K_M baked in.
+  # :latest is the hot tier (small + fast, --reasoning off). For the quality
+  # tier (Qwen3-1.7B with thinking), use :qwen3-1.7b. See README's Deployment
+  # Patterns section for two-tier setups.
   semserve:
     image: ghcr.io/c360studio/semserve:latest
     container_name: semserve-dev

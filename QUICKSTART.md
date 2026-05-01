@@ -29,7 +29,7 @@ docker compose logs -f semserve
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen2.5-0.5b",
+    "model": "qwen3-0.6b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 
@@ -42,24 +42,29 @@ docker compose down
 
 No build required - images are pulled from `ghcr.io/c360studio/semserve`.
 
-## Custom Models
+## Pre-baked Image Variants
 
-Default image uses Qwen2.5-0.5B (~491MB). For larger models, build with `Dockerfile.semserve`:
+CI publishes two image variants tagged by the model inside:
 
-| Resources | Model | Size | Notes |
-|-----------|-------|------|-------|
-| Edge / <1GB RAM | Qwen2.5-0.5B Q4_K_M | ~491MB | Default (pre-built) |
-| ~4GB RAM | Mistral-7B Q4_K_M | ~4.1GB | Good balance |
-| ~6GB+ RAM | Mistral-7B Q6_K | ~5.5GB | Higher quality |
+| Tag | Model | Image | Memory | Use |
+|-----|-------|-------|--------|-----|
+| `:qwen3-0.6b` (= `:latest`) | Qwen3-0.6B Q4_K_M | ~600MB | ~1.0GB | Hot path: classify, intent, defaults |
+| `:qwen3-1.7b` | Qwen3-1.7B Q4_K_M | ~1.4GB | ~2.0GB | Quality: community summary, answer synthesis |
+
+For other models build locally with build args:
 
 ```bash
-# Build custom model image
 MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
 MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
-docker build -f Dockerfile.semserve -t semserve:custom .
+SEMSERVE_ALIAS=mistral-7b \
+docker build -f Dockerfile.semserve -t semserve:mistral \
+  --build-arg MODEL_REPO --build-arg MODEL_FILE --build-arg SEMSERVE_ALIAS .
 
-# Then update docker-compose.yml to use semserve:custom
+# Then update docker-compose.yml to use semserve:mistral
 ```
+
+For deploying both tiers side-by-side with capability-aware routing, see
+the **Deployment Patterns** section in [README.md](./README.md).
 
 ## Architecture
 
@@ -144,14 +149,16 @@ lsof -i :11435  # semserve
 
 **Service URL**: `http://localhost:8083`
 
-**Backend**: semserve / llama-server (Qwen2.5-0.5B default, configurable)
+**Backend**: semserve / llama-server (Qwen3-0.6B Q4_K_M default `:latest`; Qwen3-1.7B at `:qwen3-1.7b`)
 
-**Expected Latency**: 300-500ms per response (Qwen2.5-0.5B on CPU)
+**Expected Latency**: 200-400ms per response (Qwen3-0.6B on CPU)
 
 **Memory Usage**:
 
 - seminstruct: ~256MB
-- semserve: ~1-2GB for Qwen2.5-0.5B Q4_K_M; ~4-10GB for 7B models depending on quantization
+- semserve hot (Qwen3-0.6B): ~1.0GB at `-np 4 -cb -c 2048`
+- semserve quality (Qwen3-1.7B): ~2.0GB at same settings
+- 7B-class custom models: ~4-10GB depending on quantization
 
 ## Before You Push
 

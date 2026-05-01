@@ -32,7 +32,7 @@ jobs:
 
       - name: Start services
         run: |
-          echo "Starting services with small model (Qwen2.5-0.5B)..."
+          echo "Starting services with small model (Qwen3-0.6B Q4_K_M)..."
           docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
 
       - name: Wait for semserve model load
@@ -97,7 +97,7 @@ jobs:
         run: |
           echo "Testing chat completions endpoint..."
           # Get available models from semserve. llama-server is launched with
-          # --alias qwen2.5-0.5b so that id should always be present.
+          # --alias qwen3-0.6b so that id should always be present.
           models=$(curl -s http://localhost:8083/v1/models)
           echo "Available models: $models"
           model_id=$(echo "$models" | jq -r '.data[] | select(.id | contains("qwen")) | .id' | head -1)
@@ -204,7 +204,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   push-semserve:
-    name: Push Semserve to GHCR
+    name: Push Semserve to GHCR (${{ matrix.variant.alias }})
     runs-on: ubuntu-latest
     needs: [build, security, lint]
     # Only push semserve when its Dockerfile changes, or on manual trigger
@@ -214,6 +214,28 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          # Hot tier: small + fast for intent / classification / defaults.model.
+          # reasoning=off so Qwen3 doesn't burn tokens on chain-of-thought
+          # prefix before the actual classification token. Aliased as :latest
+          # since single-endpoint deployments most often want the hot path.
+          - alias: qwen3-0.6b
+            repo: unsloth/Qwen3-0.6B-GGUF
+            file: Qwen3-0.6B-Q4_K_M.gguf
+            reasoning: off
+            extra_tags: |
+              type=raw,value=latest,enable={{is_default_branch}}
+          # Quality tier: 1.7B for community_summary / answer_synthesis.
+          # reasoning=auto lets Qwen3 think on harder summary tasks; this is
+          # background batch so the latency cost is acceptable.
+          - alias: qwen3-1.7b
+            repo: unsloth/Qwen3-1.7B-GGUF
+            file: Qwen3-1.7B-Q4_K_M.gguf
+            reasoning: auto
+            extra_tags: ""
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -234,9 +256,9 @@ jobs:
         with:
           images: ghcr.io/c360studio/semserve
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=qwen2.5-0.5b,enable={{is_default_branch}}
-            type=raw,value=main-{{sha}},enable={{is_default_branch}}
+            type=raw,value=${{ matrix.variant.alias }},enable={{is_default_branch}}
+            type=raw,value=${{ matrix.variant.alias }}-{{sha}},enable={{is_default_branch}}
+            ${{ matrix.variant.extra_tags }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -247,5 +269,17 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            MODEL_REPO=${{ matrix.variant.repo }}
+            MODEL_FILE=${{ matrix.variant.file }}
+            SEMSERVE_ALIAS=${{ matrix.variant.alias }}
+            SEMSERVE_REASONING=${{ matrix.variant.reasoning }}
+          # Share the llama.cpp builder stage cache across matrix entries
+          # (scope=builder). Each variant has its own model+runtime cache
+          # (scope=variant-${alias}) since those layers differ.
+          cache-from: |
+            type=gha,scope=semserve-builder
+            type=gha,scope=semserve-${{ matrix.variant.alias }}
+          cache-to: |
+            type=gha,scope=semserve-builder,mode=max
+            type=gha,scope=semserve-${{ matrix.variant.alias }},mode=max

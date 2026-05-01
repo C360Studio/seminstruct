@@ -87,7 +87,7 @@ context per request.
                ▼
 ┌─────────────────────────────────────┐
 │            semserve                 │
-│  llama-server (llama.cpp)           │  ~1-2GB memory (0.5B Q4)
+│  llama-server (llama.cpp)           │  ~1.5GB memory (0.6B Q4, np=4)
 │  -np 4 -cb (concurrent inference)   │
 └─────────────────────────────────────┘
 ```
@@ -105,7 +105,7 @@ docker compose logs -f semserve
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen2.5-0.5b",
+    "model": "qwen3-0.6b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
@@ -122,7 +122,7 @@ OpenAI-compatible chat completions endpoint (proxied to semserve).
 
 ```json
 {
-  "model": "qwen2.5-0.5b",
+  "model": "qwen3-0.6b",
   "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Summarize this article..."}
@@ -139,7 +139,7 @@ OpenAI-compatible chat completions endpoint (proxied to semserve).
   "id": "chatcmpl-abc123def456ghi789",
   "object": "chat.completion",
   "created": 1699000000,
-  "model": "qwen2.5-0.5b",
+  "model": "qwen3-0.6b",
   "choices": [
     {
       "index": 0,
@@ -212,7 +212,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="qwen2.5-0.5b",
+    model="qwen3-0.6b",
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Hello!"}
@@ -229,7 +229,7 @@ print(response.choices[0].message.content)
 curl http://localhost:8083/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen2.5-0.5b",
+    "model": "qwen3-0.6b",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
@@ -244,14 +244,37 @@ curl http://localhost:8083/v1/chat/completions \
 | `SEMINSTRUCT_MAX_RETRIES` | `3` | Max retry attempts |
 | `RUST_LOG` | `info` | Log level |
 
-## Performance
+## Image Variants
 
-| Metric | seminstruct | semserve |
-|--------|-------------|----------|
-| Memory | ~256MB | ~1-2GB (Qwen2.5-0.5B Q4_K_M) |
-| Startup | <1s | ~30s (model already loaded) |
-| Container Size | ~50MB | ~600MB |
-| Concurrency | per-connection (Tokio) | 4 parallel slots (`-np 4 -cb`) |
+CI publishes two pre-baked semserve images, tagged by **the model inside**:
+
+| Tag | Model | Image size | Memory (np=4, ctx=2048) | Best for |
+|---|---|---|---|---|
+| `:qwen3-0.6b` (also `:latest`) | Qwen3-0.6B Q4_K_M | ~600MB | ~1.2GB | Hot path: intent + classify, `defaults.model`, every-message latency |
+| `:qwen3-1.7b` | Qwen3-1.7B Q4_K_M | ~1.4GB | ~2GB | Quality tier: community summaries, answer synthesis, anomaly review |
+
+Tagging by model name (not deployment role) is intentional — `:qwen3-0.6b`
+tells you what's *inside* the image; "hot" or "quality" is deployment intent
+that lives in your compose / registry config, not the image tag. `:latest`
+points at the 0.6B variant because that's the most common single-endpoint
+deployment.
+
+**Qwen3 thinking**: Qwen3 is a hybrid model that emits chain-of-thought
+inside `<think>...</think>` tags (separated into `message.reasoning_content`
+on the response). The hot image bakes `--reasoning off` because intent
+classification doesn't benefit from 100+ tokens of thinking prefix; the
+quality image bakes `--reasoning auto` so it can think on harder summary
+work. Override per-deployment with `-e SEMSERVE_REASONING=on|off|auto`.
+
+For other models (Mistral, etc.) build locally with `Dockerfile.semserve`:
+
+```bash
+MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
+MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
+SEMSERVE_ALIAS=mistral-7b \
+docker build -f Dockerfile.semserve -t semserve:mistral \
+  --build-arg MODEL_REPO --build-arg MODEL_FILE --build-arg SEMSERVE_ALIAS .
+```
 
 ## Docker Deployment
 
@@ -266,7 +289,7 @@ This pulls pre-built images from GHCR and starts both services.
 ### Manual
 
 ```bash
-# Start semserve first (pre-built with Qwen2.5-0.5B)
+# Start semserve first (pre-built with Qwen3-0.6B)
 docker run -d \
   --name semserve \
   -p 11435:11435 \
@@ -281,17 +304,98 @@ docker run -d \
   ghcr.io/c360studio/seminstruct:latest
 ```
 
-### Custom Models
+## Deployment Patterns
 
-To use a different GGUF model, build with `Dockerfile.semserve`:
+For the simplest case, run one `seminstruct` + one `semserve:latest` and
+point everything at it. That works fine until two workload classes start
+sharing the inference queue and the cheap one (e.g. intent classification)
+starves behind the expensive one (e.g. graph community summaries). The
+fix is to deploy more than one semserve instance and let the caller route
+by capability.
 
-```bash
-MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
-MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
-docker build -f Dockerfile.semserve -t semserve:custom .
+### Three-endpoint reference deployment
+
+The shape we recommend for SemStreams workloads with the new model
+registry (capabilities → endpoints):
+
+```text
+                                   ┌── semserve:qwen3-0.6b   :11435  ── hot
+seminstruct ──┬── (proxy retry) ──┤
+              │                    └── semserve:qwen3-1.7b   :11436  ── quality
+              │
+              └── semembed (separate)  :8081                          ── embedding
 ```
 
-Then update `docker-compose.yml` to use `semserve:custom`.
+| SemStreams endpoint | Image | `--alias` (model id) | Capabilities to route here |
+|---|---|---|---|
+| `semserve-hot` | `ghcr.io/c360studio/semserve:qwen3-0.6b` | `qwen3-0.6b` | `query_classification`, intent classification (hidden), `defaults.model` |
+| `semserve-quality` | `ghcr.io/c360studio/semserve:qwen3-1.7b` | `qwen3-1.7b` | `community_summary`, `answer_synthesis` fallback, anomaly review (piggyback) |
+| `semembed` | `ghcr.io/c360studio/semembed:latest` | n/a (embeddings) | `embedding` |
+
+### Two operator notes that bite if missed
+
+1. **Point `defaults.model` at the hot endpoint, not quality.** Several
+   SemStreams call sites (intent classification on every user message,
+   onboarding layer normalization) currently fall through to
+   `defaults.model` — they have no capability constant yet. Putting
+   `defaults.model` on the quality endpoint means every user message
+   queues behind background summary work, which is the failure mode this
+   project's concurrency story exists to prevent.
+
+2. **Anomaly relationship review piggybacks on `community_summary`.**
+   It's not its own capability — it shares the LLMClient injected into
+   graph-clustering. Whatever endpoint owns `community_summary` will
+   also carry anomaly review load; size accordingly and don't be
+   surprised when `seminstruct_requests_total` for the quality endpoint
+   is higher than `community_summary` alone would predict.
+
+## Resource Use
+
+### Per-process budget
+
+For a single `semserve` process running with `-np 4 -cb -c 2048`:
+
+| Component | Qwen3-0.6B Q4_K_M | Qwen3-1.7B Q4_K_M |
+|---|---|---|
+| Model weights | ~430MB | ~1.1GB |
+| KV cache (4 slots × 2048 ctx) | ~110MB | ~250MB |
+| Compute / activations / overhead | ~400MB | ~600MB |
+| **Process total** | **~1.0GB** | **~2.0GB** |
+| Container image on disk | ~600MB | ~1.4GB |
+
+`seminstruct` (the proxy) is independent: ~256MB process memory, ~50MB
+image, regardless of which backend it talks to.
+
+### CPU under concurrency
+
+`-np 4` means four logical inference slots, **not** four parallel forward
+passes. With `-cb` (continuous batching) llama-server batches active slot
+requests into a single forward pass per step — throughput goes up,
+per-token latency stays roughly constant for the best slot, and the
+worst-case slot only pays a small batching overhead. So:
+
+- 4 cores is a reasonable floor for the hot tier; 8 cores comfortable.
+- 8 cores is a reasonable floor for the quality tier on CPU.
+- More slots than that costs little memory but produces diminishing
+  returns once compute saturates — the bottleneck moves from queue
+  depth to raw forward-pass throughput.
+
+If you raise `-np`, also raise `-c` only if you need longer per-request
+context — KV cache scales linearly with `slots × ctx`.
+
+### Three-endpoint reference total
+
+Co-locating the reference deployment on a single host:
+
+| Component | Memory | Image |
+|---|---|---|
+| seminstruct (×1) | ~256MB | ~50MB |
+| semserve hot (qwen3-0.6b) | ~1.0GB | ~600MB |
+| semserve quality (qwen3-1.7b) | ~2.0GB | ~1.4GB |
+| semembed | ~512MB | ~1GB |
+| **Total** | **~3.8GB** | **~3GB on disk** |
+
+Comfortable on a 4-core / 8GB host; comfortable headroom on 8-core / 16GB.
 
 ## Migration from `semshimmy`
 
@@ -335,5 +439,5 @@ MIT
 ---
 
 **Port**: `8083`
-**Backend**: semserve / llama-server (Qwen2.5-0.5B default, configurable)
+**Backend**: semserve / llama-server (Qwen3-0.6B default `:latest`, Qwen3-1.7B `:qwen3-1.7b`, custom configurable)
 **API**: OpenAI-compatible `/v1/chat/completions`

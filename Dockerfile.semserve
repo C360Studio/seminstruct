@@ -6,12 +6,19 @@
 #   - Direct upstream of llama.cpp; no third-party wrapper layer.
 #   - Active daily maintenance vs shimmy's slowdown.
 #
-# Default model: Qwen2.5-0.5B Q4_K_M (~491MB) - edge / CI friendly.
+# Default model: Qwen3-0.6B Q4_K_M (~440MB) - hot tier (intent + classify).
+# CI also publishes a quality-tier image with Qwen3-1.7B Q4_K_M baked in
+# for the community_summary / answer_synthesis path; see CI workflow's
+# push-semserve matrix and the "Deployment patterns" section in README.
 # Override via build args:
+#
+#   MODEL_REPO=unsloth/Qwen3-1.7B-GGUF \
+#   MODEL_FILE=Qwen3-1.7B-Q4_K_M.gguf \
+#   docker build -f Dockerfile.semserve -t semserve:quality .
 #
 #   MODEL_REPO=TheBloke/Mistral-7B-Instruct-v0.2-GGUF \
 #   MODEL_FILE=mistral-7b-instruct-v0.2.Q4_K_M.gguf \
-#   docker build -f Dockerfile.semserve -t semserve:custom .
+#   docker build -f Dockerfile.semserve -t semserve:mistral .
 
 # ============================================================================
 # Stage 1: Build llama-server from source
@@ -56,8 +63,8 @@ RUN pip install --no-cache-dir huggingface-hub
 
 WORKDIR /models
 
-ARG MODEL_REPO=Qwen/Qwen2.5-0.5B-Instruct-GGUF
-ARG MODEL_FILE=qwen2.5-0.5b-instruct-q4_k_m.gguf
+ARG MODEL_REPO=unsloth/Qwen3-0.6B-GGUF
+ARG MODEL_FILE=Qwen3-0.6B-Q4_K_M.gguf
 
 # Download then rename to a fixed path so the runtime CMD doesn't depend
 # on the build-arg filename.
@@ -93,21 +100,40 @@ EXPOSE 11435
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
     CMD curl -f http://localhost:11435/health || exit 1
 
+# Build-time → runtime knobs. Each ARG becomes an ENV with the same name,
+# so operators can also override at runtime via `-e VAR=...`.
+#
+# SEMSERVE_ALIAS: model id surfaced in /v1/models. Seminstruct's readiness
+#   probe keys off this. CI matrix sets per-variant.
+#
+# SEMSERVE_REASONING: Qwen3 has hybrid thinking. Default `off` because the
+#   hot-tier deployment (classification, intent, defaults.model) needs
+#   short, latency-bounded responses, not 100+ tokens of chain-of-thought
+#   prefix. The quality tier image overrides to `auto` via the CI matrix.
+#   Values: on | off | auto. See `llama-server --help`.
+ARG SEMSERVE_ALIAS=qwen3-0.6b
+ARG SEMSERVE_REASONING=off
+ENV SEMSERVE_ALIAS=${SEMSERVE_ALIAS}
+ENV SEMSERVE_REASONING=${SEMSERVE_REASONING}
+
 # Flags:
-#   --host/-port: bind to 0.0.0.0:11435 (matches existing default).
+#   --host/--port: bind 0.0.0.0:11435.
 #   -m: path to baked-in GGUF.
-#   --alias: stable model id surfaced in /v1/models, regardless of GGUF
-#            filename or model swap. Seminstruct's readiness probe keys
-#            off this name.
+#   --alias: stable model id in /v1/models (seminstruct readiness probe).
+#   --reasoning: Qwen3 thinking on/off/auto.
 #   -np 4: four parallel inference slots — the concurrency win.
 #   -cb: continuous batching across slots (group prefill + decode work).
-#   -c 2048: context size per slot (8192 total). Plenty for 0.5b model
-#            and keeps memory bounded.
-ENTRYPOINT ["llama-server"]
-CMD ["--host", "0.0.0.0", \
-     "--port", "11435", \
-     "-m", "/models/model.gguf", \
-     "--alias", "qwen2.5-0.5b", \
-     "-np", "4", \
-     "-cb", \
-     "-c", "2048"]
+#   -c 2048: context size per slot (8192 total). Plenty for the small
+#            tier models and keeps memory bounded.
+#
+# Shell-form CMD with `exec` so the env vars expand at runtime while
+# llama-server still becomes PID 1 for clean signal handling.
+CMD ["sh", "-c", "exec llama-server \
+    --host 0.0.0.0 \
+    --port 11435 \
+    -m /models/model.gguf \
+    --alias ${SEMSERVE_ALIAS} \
+    --reasoning ${SEMSERVE_REASONING} \
+    -np 4 \
+    -cb \
+    -c 2048"]

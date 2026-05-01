@@ -250,10 +250,14 @@ impl BackendClient {
     /// Check if the backend is ready to serve inference requests.
     /// Performs a lightweight inference call to verify the model is loaded.
     pub async fn ready(&self) -> bool {
-        // Use qwen alias for readiness check - the default GGUF baked into
-        // semserve. llama-server is started with --alias qwen2.5-0.5b.
+        // SEMINSTRUCT_READY_MODEL overrides the model id used for the probe,
+        // letting operators point seminstruct at a non-default semserve image
+        // (e.g. the qwen3-1.7b "quality" tier) without rebuilding. Defaults to
+        // "qwen3-0.6b", the alias baked into semserve:latest.
+        let model = std::env::var("SEMINSTRUCT_READY_MODEL")
+            .unwrap_or_else(|_| "qwen3-0.6b".to_string());
         let request = ChatCompletionRequest {
-            model: "qwen2.5-0.5b".to_string(),
+            model,
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "hi".to_string(),
@@ -772,7 +776,7 @@ mod tests {
             "object": "list",
             "data": [
                 {
-                    "id": "qwen2.5-0.5b",
+                    "id": "qwen3-0.6b",
                     "object": "model",
                     "created": 1699000000,
                     "owned_by": "llama-server"
@@ -784,7 +788,7 @@ mod tests {
 
         assert_eq!(resp.object, "list");
         assert_eq!(resp.data.len(), 1);
-        assert_eq!(resp.data[0].id, "qwen2.5-0.5b");
+        assert_eq!(resp.data[0].id, "qwen3-0.6b");
         assert_eq!(resp.data[0].owned_by, "llama-server");
     }
 
@@ -875,7 +879,7 @@ mod tests {
         let models_response = ModelsResponse {
             object: "list".to_string(),
             data: vec![ModelInfo {
-                id: "qwen2.5-0.5b".to_string(),
+                id: "qwen3-0.6b".to_string(),
                 object: "model".to_string(),
                 created: 1699000000,
                 owned_by: "llama-server".to_string(),
@@ -901,7 +905,7 @@ mod tests {
 
         let models = result.unwrap();
         assert_eq!(models.data.len(), 1);
-        assert_eq!(models.data[0].id, "qwen2.5-0.5b");
+        assert_eq!(models.data[0].id, "qwen3-0.6b");
         mock.assert_async().await;
     }
 
@@ -942,7 +946,7 @@ mod tests {
             id: "chatcmpl-test123".to_string(),
             object: "chat.completion".to_string(),
             created: 1699000000,
-            model: "qwen2.5-0.5b".to_string(),
+            model: "qwen3-0.6b".to_string(),
             choices: vec![ChatChoice {
                 index: 0,
                 message: ChatMessage {
@@ -973,7 +977,7 @@ mod tests {
         );
 
         let request = ChatCompletionRequest {
-            model: "qwen2.5-0.5b".to_string(),
+            model: "qwen3-0.6b".to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "Hello!".to_string(),
