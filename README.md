@@ -73,10 +73,31 @@ aggressively compress salient detail, confabulate when nodes are sparse,
 and skew toward common-knowledge answers instead of node-grounded ones.
 
 1.7B remains published as a fallback for hosts that genuinely cannot
-fit 8B's ~6GB process memory, and for non-graph-persisting summary work
+fit 8B's ~9GB process memory, and for non-graph-persisting summary work
 where the failure mode is bounded (e.g. ephemeral context compaction
 where the output isn't read by anything other than the same model in
 the next step).
+
+**Why no `:qwen3-4b` variant?** Qwen3-4B exists as a GGUF, but it sits
+in a genuinely awkward zone for our deployment shape. Too big to be a
+hot-tier classifier (0.6B is faster, lighter, and good enough on
+bounded label sets) and too small to clear the GraphRAG quality bar
+for graph-persisting summaries (≥7B is the working threshold). There
+is no capability where 4B is the *right* choice:
+
+- For classification: 4B costs ~6× the memory of 0.6B for no quality
+  win on label-set tasks.
+- For graph summaries: 4B falls under the "is this output safe to
+  persist into the graph and serve to future queries" line, so it has
+  the same compounding-error failure mode as 1.7B but at 2× the cost.
+- For "memory-constrained summary fallback": 1.7B already fills this
+  slot; 4B is just a more expensive way to get the same quality class.
+
+The middle of a published variants list is where ops naturally reach
+for "balanced," and 4B would make {0.6b, 4b, 8b} look like a sensible
+tradeoff curve when it isn't — 4B is strictly worse than picking
+either neighbor for any specific workload. We deliberately omit it to
+keep the variant list a real choice, not a footgun.
 
 **Qwen3 thinking**: Qwen3 is a hybrid model that emits chain-of-thought
 inside `<think>...</think>` tags (separated into `message.reasoning_content`
