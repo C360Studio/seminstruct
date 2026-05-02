@@ -1,6 +1,6 @@
 # CI override - builds seminstruct from source for integration testing.
-# Mirrors the default :latest image (Qwen3-0.6B Q4_K_M, --reasoning off)
-# so CI exercises the same shape ops will pull.
+# Mirrors the default :latest image (Qwen3-0.6B Q4_K_M) so CI exercises
+# the same shape ops will pull.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.ci.yml build
 
 services:
@@ -13,4 +13,6 @@ services:
         MODEL_FILE: Qwen3-0.6B-Q4_K_M.gguf
         MODEL_ALIAS: qwen3-0.6b
         MODEL_REASONING: "off"
+        MODEL_CONTEXT: "16384"
+        MODEL_PARALLEL: "4"
     image: seminstruct:ci

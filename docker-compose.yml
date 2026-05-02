@@ -13,12 +13,21 @@ services:
     ports:
       - "8083:8083"
     environment:
-      # Override at runtime without rebuilding the image.
-      # MODEL_ALIAS: stable model id surfaced in /v1/models.
-      # MODEL_REASONING: Qwen3 thinking — on | off | auto. Defaults to off
-      #   in :latest (hot tier); :qwen3-1.7b bakes auto.
+      # Runtime overrides — the image bakes sensible defaults per variant,
+      # but every knob below can be tuned per deployment without rebuilding.
+      # See README's Configuration section for the full set.
       - MODEL_ALIAS=qwen3-0.6b
       - MODEL_REASONING=off
+      # MODEL_CONTEXT: total context, divided across MODEL_PARALLEL slots.
+      # Default 16384 / 4 = 4096 tokens per slot. Crank up for bigger
+      # graph-summary prompts (memory cost scales linearly).
+      - MODEL_CONTEXT=16384
+      - MODEL_PARALLEL=4
+      # MODEL_THREADS: empty = auto-detect. Set explicitly on shared hosts
+      #   to prevent CPU oversubscription.
+      # - MODEL_THREADS=
+      # MODEL_API_KEY: empty = no auth. Set to require Bearer token.
+      # - MODEL_API_KEY=
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
       interval: 30s

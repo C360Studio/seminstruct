@@ -107,38 +107,76 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
 # so operators can also override at runtime via `-e VAR=...`.
 #
 # MODEL_ALIAS: stable model id surfaced in /v1/models. CI matrix sets
-#   per-variant (qwen3-0.6b, qwen3-1.7b, ...). Operators can rename
-#   without rebuilding.
+#   per-variant (qwen3-0.6b, qwen3-1.7b, qwen3-8b). Operators can
+#   rename without rebuilding.
 #
 # MODEL_REASONING: Qwen3 has hybrid thinking. Default `off` because the
 #   hot-tier deployment (classification, intent, defaults.model) needs
 #   short, latency-bounded responses, not 100+ tokens of chain-of-thought
-#   prefix. The quality tier (:qwen3-1.7b) overrides to `auto` so it can
-#   think on harder summary work where latency cost is acceptable.
+#   prefix. The summary tiers (:qwen3-1.7b, :qwen3-8b) override to `auto`
+#   so they can think on harder summary work.
 #   Values: on | off | auto. See `llama-server --help`.
+#
+# MODEL_CONTEXT: total context budget passed to llama-server's `-c` flag.
+#   IMPORTANT: llama-server divides total context across parallel slots,
+#   so per-slot context = MODEL_CONTEXT / MODEL_PARALLEL. Default of
+#   16384 with MODEL_PARALLEL=4 gives 4096 tokens per slot — enough for
+#   typical graph-summary prompts (500-1000 tokens input + completion
+#   budget) with headroom. Crank up for big-context summarization;
+#   memory cost scales linearly with context (KV cache size).
+#
+# MODEL_PARALLEL: `-np` parallel slots. Default 4. Hot-tier deployments
+#   doing cheap classification can dial up (e.g. 8) for more concurrent
+#   throughput; memory-pressured 8B deployments may dial down to 2.
+#
+# MODEL_THREADS: `-t` compute thread count. Empty (default) lets
+#   llama-server auto-detect. Set explicitly when sharing a host with
+#   other CPU-bound services to prevent oversubscription.
+#
+# MODEL_API_KEY: `--api-key` bearer token. Empty (default) = no auth.
+#   Set ONLY at runtime via `-e MODEL_API_KEY=...`; intentionally not a
+#   build arg, so a key can never get baked into a published image's
+#   history. Clients pass `Authorization: Bearer <key>` on requests.
 ARG MODEL_ALIAS=qwen3-0.6b
 ARG MODEL_REASONING=off
+ARG MODEL_CONTEXT=16384
+ARG MODEL_PARALLEL=4
+ARG MODEL_THREADS=""
 ENV MODEL_ALIAS=${MODEL_ALIAS}
 ENV MODEL_REASONING=${MODEL_REASONING}
+ENV MODEL_CONTEXT=${MODEL_CONTEXT}
+ENV MODEL_PARALLEL=${MODEL_PARALLEL}
+ENV MODEL_THREADS=${MODEL_THREADS}
+ENV MODEL_API_KEY=""
 
 # Flags:
 #   --host/--port: bind 0.0.0.0:8083 (the canonical seminstruct port).
 #   -m: path to baked-in GGUF.
 #   --alias: stable model id in /v1/models.
 #   --reasoning: Qwen3 thinking on/off/auto.
-#   -np 4: four parallel inference slots — the concurrency win.
+#   -np: parallel slots (concurrency).
+#   -c: TOTAL context, divided across slots.
 #   -cb: continuous batching across slots (group prefill + decode work).
-#   -c 2048: context size per slot (8192 total). Plenty for the small
-#            tier models and keeps memory bounded.
+#   --metrics: enables /metrics Prometheus endpoint. Restores the
+#     ops-integration surface that the (now-removed) Rust proxy used to
+#     provide. No env knob — always on.
+#   -t: compute threads, only included when MODEL_THREADS is non-empty.
+#   --api-key: bearer auth, only included when MODEL_API_KEY is non-empty.
 #
 # Shell-form CMD with `exec` so the env vars expand at runtime while
-# llama-server still becomes PID 1 for clean signal handling.
+# llama-server still becomes PID 1 for clean signal handling. The
+# `${VAR:+...}` expansions conditionally include flags only when the
+# corresponding env var is set and non-empty — keeps the command line
+# clean when ops doesn't need to override defaults.
 CMD ["sh", "-c", "exec llama-server \
     --host 0.0.0.0 \
     --port 8083 \
     -m /models/model.gguf \
     --alias ${MODEL_ALIAS} \
     --reasoning ${MODEL_REASONING} \
-    -np 4 \
+    -np ${MODEL_PARALLEL} \
+    -c ${MODEL_CONTEXT} \
     -cb \
-    -c 2048"]
+    --metrics \
+    ${MODEL_THREADS:+-t ${MODEL_THREADS}} \
+    ${MODEL_API_KEY:+--api-key ${MODEL_API_KEY}}"]

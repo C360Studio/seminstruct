@@ -127,25 +127,51 @@ For Kubernetes readiness probes, use `/health` directly on port 8083 —
 once it returns 200, llama-server has loaded the GGUF and is accepting
 requests.
 
+### GET /metrics
+
+Prometheus exposition format. Includes per-slot occupancy, request
+counts, token throughput, KV cache usage. Always on (`--metrics` is
+baked into the CMD). Useful starter targets for grafana dashboards
+include `llamacpp:n_busy_slots_per_decode`, `llamacpp:prompt_tokens_total`,
+and `llamacpp:tokens_predicted_total`.
+
 ## Configuration
 
-Runtime overrides (all read from process env; the image bakes defaults
-matching the variant's tier):
+Every knob below is settable as both a build arg (bakes a default into
+the image) **and** a runtime env var (overrides the baked default
+without rebuilding). Set what you need at the level you need it.
 
-| Variable | Default in `:latest` | Description |
+### Runtime / build-time knobs
+
+| Variable | Default | What it controls |
 |---|---|---|
-| `MODEL_ALIAS` | `qwen3-0.6b` | Model id surfaced in `/v1/models`. Operators can rename without rebuilding. |
-| `MODEL_REASONING` | `off` | Qwen3 thinking: `on` \| `off` \| `auto`. |
+| `MODEL_ALIAS` | `qwen3-0.6b` | Model id surfaced in `/v1/models`. CI bakes per-variant. |
+| `MODEL_REASONING` | `off` (`auto` for summary tiers) | Qwen3 thinking: `on` \| `off` \| `auto`. |
+| `MODEL_CONTEXT` | `16384` | **Total** `-c` budget, divided across slots. Per-slot context = `MODEL_CONTEXT / MODEL_PARALLEL`. |
+| `MODEL_PARALLEL` | `4` | `-np` parallel inference slots. |
+| `MODEL_THREADS` | (empty = auto) | `-t` compute thread count. Pin on shared hosts. |
+| `MODEL_API_KEY` | (empty = no auth) | `--api-key` Bearer token. **Runtime-only** (intentionally not a build arg, so keys can't be baked into published image history). Set when seminstruct is exposed beyond an internal network. |
 
-Build-time arguments (set via `--build-arg`):
+> **Context arithmetic gotcha.** `llama-server`'s `-c` is the *total*
+> context budget, divided across `-np` slots. With the default
+> `MODEL_CONTEXT=16384 MODEL_PARALLEL=4`, each slot gets 4096 tokens.
+> If your prompts plus completion budget exceed per-slot context, every
+> request fails with a 400 — symptom is "every request fails after the
+> deployment looked healthy on `/health`." Crank `MODEL_CONTEXT` up
+> (memory cost scales linearly with KV cache size).
 
-| Variable | Default | Description |
+### Build-only arguments
+
+| Variable | Default | What it controls |
 |---|---|---|
 | `MODEL_REPO` | `unsloth/Qwen3-0.6B-GGUF` | Hugging Face repo containing the GGUF |
 | `MODEL_FILE` | `Qwen3-0.6B-Q4_K_M.gguf` | GGUF filename within the repo |
-| `MODEL_ALIAS` | `qwen3-0.6b` | Bakes the default `--alias` |
-| `MODEL_REASONING` | `off` | Bakes the default `--reasoning` |
 | `LLAMA_CPP_TAG` | `b8994` | llama.cpp build tag (immutable) |
+
+### Always-on flags (no knob)
+
+- `--metrics` — llama-server's native Prometheus endpoint at `/metrics`.
+- `-cb` — continuous batching across slots. The throughput win for `-np > 1`.
 
 ## Deployment Patterns
 
@@ -216,15 +242,26 @@ exists for this scenario, not as a recommended default.
 
 ### Per-container budget
 
-For a single seminstruct container running with `-np 4 -cb -c 2048`:
+Each variant bakes per-tier defaults for `MODEL_PARALLEL` and
+`MODEL_CONTEXT` (overridable at runtime). The numbers below assume
+those defaults:
 
 | Component | :qwen3-0.6b | :qwen3-1.7b | :qwen3-8b |
 |---|---|---|---|
+| `MODEL_PARALLEL` (slots) | 4 | 4 | 2 |
+| `MODEL_CONTEXT` (total) | 16384 | 16384 | 16384 |
+| Per-slot context | 4096 | 4096 | 8192 |
 | Model weights (Q4_K_M) | ~430MB | ~1.1GB | ~4.7GB |
-| KV cache (4 slots × 2048 ctx) | ~110MB | ~250MB | ~700MB |
-| Compute / activations / overhead | ~400MB | ~600MB | ~600MB |
-| **Process total** | **~1.0GB** | **~2.0GB** | **~6.0GB** |
+| KV cache (fp16, total ctx) | ~880MB | ~2.0GB | ~5.6GB |
+| Compute / activations / overhead | ~400MB | ~600MB | ~700MB |
+| **Process total** | **~1.7GB** | **~3.7GB** | **~9.0GB** |
 | Container image on disk | ~600MB | ~1.4GB | ~5.3GB |
+
+The 8B is configured with 2 slots instead of 4 because each summary
+forward pass is heavier — fewer concurrent slots makes more sense than
+spreading thin per-slot context across more parallelism. Override via
+`-e MODEL_PARALLEL=4 -e MODEL_CONTEXT=32768` if your host has the
+memory for higher-throughput summary work.
 
 ### CPU under concurrency
 
@@ -245,24 +282,29 @@ context — KV cache scales linearly with `slots × ctx`.
 ### Reference deployment total
 
 Co-locating the recommended deployment (hot + 8B summary + embed) on a
-single host:
+single host, with default `MODEL_PARALLEL` / `MODEL_CONTEXT`:
 
 | Component | Memory | Image |
 |---|---|---|
-| seminstruct hot (qwen3-0.6b) | ~1.0GB | ~600MB |
-| seminstruct summary (qwen3-8b) | ~6.0GB | ~5.3GB |
+| seminstruct hot (qwen3-0.6b) | ~1.7GB | ~600MB |
+| seminstruct summary (qwen3-8b) | ~9.0GB | ~5.3GB |
 | semembed | ~512MB | ~1GB |
-| **Total** | **~7.5GB** | **~7GB on disk** |
+| **Total** | **~11.2GB** | **~7GB on disk** |
 
-16GB host minimum is comfortable. The 8B summary tier is CPU-feasible
-but a GPU dramatically improves throughput — community summarization is
-typically the rate-limiting step in graph builds, and CPU 8B inference
-runs at single-digit tok/s per slot.
+16GB host minimum is comfortable; 24GB+ gives real headroom. The 8B
+summary tier is CPU-feasible but a GPU dramatically improves throughput
+— community summarization is typically the rate-limiting step in graph
+builds, and CPU 8B inference runs at single-digit tok/s per slot.
 
 **Memory-constrained fallback** (1.7B substituted into the summary
-slot, accepting the quality tradeoff): ~3.5GB total memory, ~3GB disk.
+slot, accepting the quality tradeoff): ~5.5GB total memory, ~3GB disk.
 Comfortable on 4-core / 8GB. Not recommended unless 8B genuinely won't
 fit.
+
+**Smaller-context override** if 11GB is too much: drop
+`MODEL_CONTEXT=8192` on the 8B deployment — gives 4096 per slot
+(still enough for typical graph summaries), saves ~2.8GB of KV cache,
+brings the total down to ~8.5GB.
 
 ## Migration Notes
 

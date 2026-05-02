@@ -129,27 +129,37 @@ jobs:
           # reasoning=off so Qwen3 doesn't burn tokens on chain-of-thought
           # prefix before the actual classification token. Aliased as :latest
           # since single-endpoint deployments most often want the hot path.
+          # parallel=4, context=16384 → 4096 tokens per slot, plenty for
+          # short classification prompts.
           - alias: qwen3-0.6b
             repo: unsloth/Qwen3-0.6B-GGUF
             file: Qwen3-0.6B-Q4_K_M.gguf
             reasoning: off
+            parallel: 4
+            context: 16384
             extra_tags: |
               type=raw,value=latest,enable={{is_default_branch}}
-          # Quality tier: 1.7B for community_summary / answer_synthesis.
-          # reasoning=auto lets Qwen3 think on harder summary tasks; this is
-          # background batch so the latency cost is acceptable.
+          # Memory-constrained summary fallback. Substitute for :qwen3-8b
+          # when the host can't fit 8B; expect quality degradation in
+          # graph-persisted summaries. reasoning=auto.
           - alias: qwen3-1.7b
             repo: unsloth/Qwen3-1.7B-GGUF
             file: Qwen3-1.7B-Q4_K_M.gguf
             reasoning: auto
+            parallel: 4
+            context: 16384
             extra_tags: ""
-          # Premium tier: 8B for deployments with the memory budget who want
-          # higher answer/summary quality. ~5GB image, ~6GB process memory at
-          # -np 4 -cb -c 2048. reasoning=auto.
+          # Recommended summary tier: 8B for community_summary /
+          # answer_synthesis. parallel=2 (fewer concurrent slots since
+          # each summary is heavier) with context=16384 → 8192 tokens per
+          # slot, comfortable for graph-context summaries. ~9GB process
+          # memory. reasoning=auto.
           - alias: qwen3-8b
             repo: unsloth/Qwen3-8B-GGUF
             file: Qwen3-8B-Q4_K_M.gguf
             reasoning: auto
+            parallel: 2
+            context: 16384
             extra_tags: ""
     steps:
       - name: Checkout code
@@ -189,6 +199,8 @@ jobs:
             MODEL_FILE=${{ matrix.variant.file }}
             MODEL_ALIAS=${{ matrix.variant.alias }}
             MODEL_REASONING=${{ matrix.variant.reasoning }}
+            MODEL_PARALLEL=${{ matrix.variant.parallel }}
+            MODEL_CONTEXT=${{ matrix.variant.context }}
           # Share the llama.cpp builder stage cache across matrix entries
           # (scope=builder). Each variant has its own model+runtime cache
           # (scope=variant-<alias>) since those layers differ.
