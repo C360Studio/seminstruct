@@ -201,12 +201,13 @@ jobs:
             MODEL_REASONING=${{ matrix.variant.reasoning }}
             MODEL_PARALLEL=${{ matrix.variant.parallel }}
             MODEL_CONTEXT=${{ matrix.variant.context }}
-          # Share the llama.cpp builder stage cache across matrix entries
-          # (scope=builder). Each variant has its own model+runtime cache
-          # (scope=variant-<alias>) since those layers differ.
-          cache-from: |
-            type=gha,scope=seminstruct-builder
-            type=gha,scope=seminstruct-${{ matrix.variant.alias }}
-          cache-to: |
-            type=gha,scope=seminstruct-builder,mode=max
-            type=gha,scope=seminstruct-${{ matrix.variant.alias }},mode=max
+          # Share only the llama.cpp builder stage cache across matrix
+          # entries. We previously also cached per-variant layers, but
+          # the combined cache footprint (~10GB across builder + 3
+          # variants × multi-arch) hit GHA's 10GB-per-repo cap and
+          # evictions mid-build caused BlobNotFound failures on the 8B
+          # variant. Per-variant caching gave little real benefit anyway:
+          # each variant has a unique model file, so cross-variant cache
+          # hits aren't possible at the runtime-stage layers.
+          cache-from: type=gha,scope=seminstruct-builder
+          cache-to: type=gha,scope=seminstruct-builder,mode=max
